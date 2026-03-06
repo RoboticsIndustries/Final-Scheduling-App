@@ -245,7 +245,12 @@ export default function App() {
         if (data.schedule) setSchedule(data.schedule);
         if (data.days && data.days.length > 0) {
           setDays(data.days);
-          setSelectedDay(prev => prev || data.days[0]);
+          // Always set selectedDay from Firestore if not already set —
+          // this is what makes it work on phones / new devices without re-uploading
+          setSelectedDay(prev => {
+            if (prev && data.days.includes(prev)) return prev;
+            return data.days[0];
+          });
         }
         if (data.dayDates) setDayDates(prev => ({ ...prev, ...data.dayDates }));
       }
@@ -331,7 +336,9 @@ export default function App() {
     }
   }, [getPersonalSlots, dayDates]);
 
-  const hasSchedule = !!schedule && days.length > 0;
+  const effectiveDays = days.length > 0 ? days : (schedule ? ["Friday","Saturday","Sunday"].filter(d => schedule[d] && Object.keys(schedule[d]).length > 0) : []);
+  const effectiveSelectedDay = (selectedDay && effectiveDays.includes(selectedDay)) ? selectedDay : (effectiveDays[0] || null);
+  const hasSchedule = !!schedule && effectiveDays.length > 0;
 
   if (loadingFirebase) return (
     <div style={{ ...S.root, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:16 }}>
@@ -485,7 +492,7 @@ export default function App() {
                         {notifEnabled ? "✓ Notifications Active" : "🔔 Enable Notifications"}
                       </button>
 
-                      {days.map(day => {
+                      {effectiveDays.map(day => {
                         const mySlots = getPersonalSlots(userName).filter(x => x.day === day);
                         return (
                           <div key={day} style={{ marginBottom:32 }}>
@@ -530,13 +537,13 @@ export default function App() {
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24, flexWrap:"wrap", gap:12 }}>
               <h2 style={{ ...S.pt, margin:0 }}>Full Schedule</h2>
               <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                {days.map(day => (
+                {effectiveDays.map(day => (
                   <button
                     key={day}
                     style={{
                       ...S.bs, padding:"6px 18px", fontSize:12,
-                      background: selectedDay === day ? "#f4a261" : "transparent",
-                      color:      selectedDay === day ? "#0a0a0f"  : "#f4a261",
+                      background: effectiveSelectedDay === day ? "#f4a261" : "transparent",
+                      color:      effectiveSelectedDay === day ? "#0a0a0f"  : "#f4a261",
                     }}
                     onClick={() => setSelectedDay(day)}
                   >
@@ -546,10 +553,10 @@ export default function App() {
               </div>
             </div>
 
-            {selectedDay && schedule[selectedDay] && (
+            {effectiveSelectedDay && schedule[effectiveSelectedDay] && (
               <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px,1fr))", gap:14 }}>
                 {TIME_SLOTS.map(slot => {
-                  const sr = schedule[selectedDay][slot];
+                  const sr = schedule[effectiveSelectedDay][slot];
                   if (!sr) return null;
                   const anyone =
                     (sr.driveTeam?.length)  || sr.pitCaptain ||
