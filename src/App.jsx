@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
- 
+
 // ─── FIREBASE ─────────────────────────────────────────────────────────────────
 const firebaseApp = initializeApp({
   apiKey: "AIzaSyDgV70U0o9hRqKHBrtt2sT26rhY4fY9tFE",
@@ -14,33 +14,33 @@ const firebaseApp = initializeApp({
 });
 const db = getFirestore(firebaseApp);
 const SCHEDULE_DOC = doc(db, "pitsync", "schedule_v3");
- 
+
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const SCOUTING_PER_SLOT = 6;  // exactly 6 scouts per slot, not counting scouting lead
 const TIME_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"];
- 
+
 function normalizeSlot(raw) {
   return raw.trim().replace(/\s*(AM|PM)/gi, "").trim();
 }
- 
+
 // Returns position + pit cert flags
 function classifyMember(roleRaw, pitProgCert, pitMechCert) {
   const r = (roleRaw || "").trim().toLowerCase();
   let position = "Member";
- 
+
   if      (r.includes("drive"))          position = "Drive Team";
   else if (r.includes("pit captain"))    position = "Pit Captain";
   else if (r.includes("scouting lead"))  position = "Scouting Lead";
   else if (r.includes("lead"))           position = "Lead";
- 
+
   const hasPitProg = (pitProgCert || "").toLowerCase().includes("yes") ||
                      (pitProgCert || "").toLowerCase().includes("option");
   const hasPitMech = (pitMechCert || "").toLowerCase().includes("yes") ||
                      (pitMechCert || "").toLowerCase().includes("option");
- 
+
   return { position, hasPitProg, hasPitMech };
 }
- 
+
 // ─── CSV PARSER ───────────────────────────────────────────────────────────────
 function parseCSVLine(line) {
   const cols = []; let cur = "", inQ = false;
@@ -52,13 +52,13 @@ function parseCSVLine(line) {
   cols.push(cur.trim());
   return cols;
 }
- 
+
 function parseCSV(text) {
   const lines = text.trim().split("\n").map(parseCSVLine);
   if (lines.length < 2) return { members: [], fixedRoles: {}, days: [] };
   const dataLines = lines.slice(1);
   const membersMap = {};
- 
+
   for (const line of dataLines) {
     if (!line || line.length < 5) continue;
     const firstName   = (line[1]  || "").trim();
@@ -69,10 +69,10 @@ function parseCSV(text) {
     const nameLower = name.toLowerCase();
     if (nameLower.includes("filler") || nameLower.includes("first last") ||
         nameLower === "first last" || nameLower.match(/^first \d+ last \d+$/) ||
-        nameLower.match(/^first \d* last \d*$/) || firstName === "First" && lastName === "Last" ||
+        nameLower.match(/^first \d* last \d*$/) || (firstName === "First" && lastName === "Last") ||
         nameLower.includes("test") || nameLower.includes("placeholder") ||
         firstName === "" || lastName === "" || firstName === lastName) continue;
- 
+
     const friArrival  = (line[4]  || "").trim();
     const satAllDay   = (line[5]  || "").trim().toLowerCase();
     const satHoursRaw = (line[6]  || "").trim();
@@ -85,31 +85,31 @@ function parseCSV(text) {
     // Some responses put cert info in col 11 (e.g. "Option 1")
     const pitProgCertFull = pitProgCert || (col11.toLowerCase().includes("option") || col11.toLowerCase().includes("yes") ? col11 : "");
     const pitMechCertFull = pitMechCert;
- 
+
     const { position, hasPitProg, hasPitMech } = classifyMember(roleRaw, pitProgCertFull, pitMechCertFull);
- 
+
     // Friday slots
     const friLower = friArrival.toLowerCase();
     let friSlots = [];
     if      (friLower.includes("4 pm") || friLower.includes("4pm")) friSlots = ["4-5","5-6"];
     else if (friLower.includes("5 pm") || friLower.includes("5pm")) friSlots = ["5-6"];
     else if (friLower.startsWith("yes"))                             friSlots = ["4-5","5-6"];
- 
+
     // Saturday slots
     let satSlots = [];
     if      (satAllDay === "yes") satSlots = [...TIME_SLOTS];
     else if (satHoursRaw)         satSlots = satHoursRaw.split(",").map(normalizeSlot).filter(s => TIME_SLOTS.includes(s));
- 
+
     // Sunday slots
     let sunSlots = [];
     if      (sunAllDay === "yes") sunSlots = [...TIME_SLOTS];
     else if (sunHoursRaw)         sunSlots = sunHoursRaw.split(",").map(normalizeSlot).filter(s => TIME_SLOTS.includes(s));
- 
+
     const timingsByDay = {};
     if (friSlots.length) timingsByDay["Friday"]   = friSlots;
     if (satSlots.length) timingsByDay["Saturday"]  = satSlots;
     if (sunSlots.length) timingsByDay["Sunday"]    = sunSlots;
- 
+
     if (membersMap[name]) {
       const ex = membersMap[name];
       for (const [day, slots] of Object.entries(timingsByDay)) {
@@ -120,11 +120,11 @@ function parseCSV(text) {
       membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
     }
   }
- 
+
   // Separate fixed roles from schedulable members
   const fixedRoles = { driveTeam: [], pitCaptain: [], leadProgrammer: [], scoutingLead: [] };
   const members = [];
- 
+
   for (const [name, info] of Object.entries(membersMap)) {
     const p = info.position;
     if (p === "Drive Team")    { fixedRoles.driveTeam.push(name); }
@@ -144,33 +144,33 @@ function parseCSV(text) {
       });
     }
   }
- 
+
   const daysOrder = ["Friday","Saturday","Sunday"];
   const days = daysOrder.filter(d =>
     members.some(m => (m.timingsByDay[d] || []).length > 0)
   );
- 
+
   return { members, fixedRoles, days };
 }
- 
+
 // ─── SCHEDULER ────────────────────────────────────────────────────────────────
 function generateSchedule(members, days) {
   const schedule = {};
- 
+
   for (const day of days) {
     schedule[day] = {};
     // Reset per-day state
     for (const m of members) { m.lastTask = null; m.pitCount = 0; m.scoutCount = 0; }
- 
+
     for (const slot of TIME_SLOTS) {
       const available = members.filter(m => (m.timingsByDay[day] || []).includes(slot));
       let rem = [...available];
- 
+
       const pitProg   = [];  // 1 pit programmer
       const pitMech   = [];  // 1 pit mechanic
       const scouting  = [];  // up to SCOUTING_PER_SLOT
       const off       = [];  // everyone else
- 
+
       const remove = (m) => { rem = rem.filter(r => r.name !== m.name); };
       const assign = (m, role) => {
         m.lastTask = role;
@@ -178,7 +178,7 @@ function generateSchedule(members, days) {
         if (role === "Scout")  m.scoutCount++;
         remove(m);
       };
- 
+
       // 1) Pick 1 pit programmer (certified, not just rested from pit)
       const progCandidates = rem.filter(m =>
         m.hasPitProg && m.lastTask !== "Pit"
@@ -187,7 +187,7 @@ function generateSchedule(members, days) {
         const m = progCandidates[0];
         pitProg.push(m.name); assign(m, "Pit");
       }
- 
+
       // 2) Pick 1 pit mechanic (certified, not just rested from pit, different person)
       const mechCandidates = rem.filter(m =>
         m.hasPitMech && m.lastTask !== "Pit"
@@ -196,7 +196,7 @@ function generateSchedule(members, days) {
         const m = mechCandidates[0];
         pitMech.push(m.name); assign(m, "Pit");
       }
- 
+
       // 3) Pick up to SCOUTING_PER_SLOT scouts from remaining
       //    Prefer people who haven't just scouted (avoid back-to-back scouting)
       const scoutCandidates = [
@@ -207,17 +207,17 @@ function generateSchedule(members, days) {
         if (scouting.length >= SCOUTING_PER_SLOT) break;
         scouting.push(m.name); assign(m, "Scout");
       }
- 
+
       // 4) Everyone else is off
       for (const m of rem) { off.push(m.name); m.lastTask = "Off"; }
- 
+
       schedule[day][slot] = { pitProg, pitMech, scouting, off };
     }
   }
- 
+
   return schedule;
 }
- 
+
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 function parseSlotTime(day, slot, dayDates) {
   const dateStr = dayDates[day]; if (!dateStr) return null;
@@ -227,13 +227,13 @@ function parseSlotTime(day, slot, dayDates) {
   base.setHours((startH >= 1 && startH <= 7) ? startH + 12 : startH, 0, 0, 0);
   return base;
 }
- 
+
 async function requestNotifPermission() {
   if (!("Notification" in window)) return false;
   if (Notification.permission === "granted") return true;
   return (await Notification.requestPermission()) === "granted";
 }
- 
+
 // ─── ROLE STYLES ──────────────────────────────────────────────────────────────
 const ROLE_STYLES = {
   "Pit Programmer": { accent: "#f4a261" },
@@ -241,7 +241,7 @@ const ROLE_STYLES = {
   "Scouting":       { accent: "#56cfe1" },
   "Off":            { accent: "#555"    },
 };
- 
+
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [view, setView] = useState("loading");
@@ -257,7 +257,7 @@ export default function App() {
   const [parseError, setParseError] = useState("");
   const [syncStatus, setSyncStatus] = useState("idle");
   const notifTimers = useRef([]);
- 
+
   // ── Firestore real-time listener ──
   useEffect(() => {
     const unsub = onSnapshot(SCHEDULE_DOC, (snap) => {
@@ -284,7 +284,7 @@ export default function App() {
     });
     return () => unsub();
   }, []);
- 
+
   // ── CSV upload ──
   const handleCSVUpload = (e) => {
     const file = e.target.files[0]; if (!file) return;
@@ -292,7 +292,7 @@ export default function App() {
     reader.onload = (ev) => { setCsvText(ev.target.result); setCsvLoaded(true); setParseError(""); };
     reader.readAsText(file);
   };
- 
+
   // ── Generate + save ──
   const handleGenerate = async () => {
     if (!csvText) return;
@@ -314,13 +314,13 @@ export default function App() {
       console.error(e);
     }
   };
- 
+
   const handleDayDate = async (day, date) => {
     const updated = { ...dayDates, [day]: date };
     setDayDates(updated);
     try { await setDoc(SCHEDULE_DOC, { schedule, fixedRoles, days, dayDates: updated }); } catch(e) {}
   };
- 
+
   // ── All names for personal schedule dropdown ──
   const allNames = schedule
     ? [...new Set(Object.values(schedule).flatMap(ds =>
@@ -329,7 +329,7 @@ export default function App() {
         )
       ))].sort()
     : [];
- 
+
   // ── Personal slots ──
   const getPersonalSlots = useCallback((name) => {
     if (!schedule || !name) return [];
@@ -345,7 +345,7 @@ export default function App() {
       }
     return result;
   }, [schedule]);
- 
+
   // ── Notifications ──
   const setupNotifs = useCallback(async (name) => {
     const granted = await requestNotifPermission();
@@ -362,7 +362,7 @@ export default function App() {
       , delay));
     }
   }, [getPersonalSlots, dayDates]);
- 
+
   // ── Derived state ──
   const effectiveDays = days.length > 0
     ? days
@@ -373,7 +373,7 @@ export default function App() {
     ? selectedDay
     : effectiveDays[0] || null;
   const hasSchedule = !!schedule && effectiveDays.length > 0;
- 
+
   // ── Loading spinner ──
   if (view === "loading") return (
     <div style={{ ...S.root, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:16 }}>
@@ -381,11 +381,11 @@ export default function App() {
       <p style={{ color:"#555", fontSize:13, letterSpacing:2 }}>CONNECTING...</p>
     </div>
   );
- 
+
   return (
     <div style={S.root}>
       <div style={S.noise} />
- 
+
       {/* ── HEADER ── */}
       <header style={S.header}>
         <div style={S.hi}>
@@ -406,9 +406,9 @@ export default function App() {
           </nav>
         </div>
       </header>
- 
+
       <main style={S.main}>
- 
+
         {/* ── LANDING (no schedule yet) ── */}
         {view === "landing" && (
           <div style={{ textAlign:"center", paddingTop:80 }}>
@@ -420,13 +420,13 @@ export default function App() {
             <button style={S.bp} onClick={() => setView("admin")}>Go to Admin</button>
           </div>
         )}
- 
+
         {/* ── ADMIN ── */}
         {view === "admin" && (
           <div style={S.panel}>
             <h2 style={S.pt}>Admin — Upload Schedule</h2>
             <p style={S.pd}>Upload once. All devices update instantly.</p>
- 
+
             <div style={S.fg}>
               <label style={S.lbl}>CSV File</label>
               <label style={S.fu}>
@@ -435,7 +435,7 @@ export default function App() {
               </label>
               {csvLoaded && <span style={S.ok}>File loaded</span>}
             </div>
- 
+
             <div style={S.ib}>
               <strong style={{ color:"#f4a261" }}>Expected columns:</strong>
               <code style={S.code}>Timestamp | First | Last | Phone | Fri arrival | Sat all-day? | Sat hours | Sun all-day? | Sun hours | Years | Role | (skip) | Pit Prog cert | Pit Mech cert</code>
@@ -444,9 +444,9 @@ export default function App() {
                 All others are scheduled for Pit Programmer, Pit Mechanic, Scouting, or Off each hour.
               </p>
             </div>
- 
+
             {parseError && <div style={S.eb}>{parseError}</div>}
- 
+
             <button
               style={{ ...S.bp, opacity: csvLoaded ? 1 : 0.4, cursor: csvLoaded ? "pointer" : "not-allowed" }}
               onClick={handleGenerate}
@@ -454,7 +454,7 @@ export default function App() {
             >
               {syncStatus === "saving" ? "Saving..." : syncStatus === "saved" ? "Saved" : "Generate & Sync Schedule"}
             </button>
- 
+
             {hasSchedule && (
               <>
                 <div style={S.sb}>Schedule is live. All devices update automatically.</div>
@@ -476,7 +476,7 @@ export default function App() {
             )}
           </div>
         )}
- 
+
         {/* ── MY SCHEDULE ── */}
         {view === "personal" && (
           <div style={S.panel}>
@@ -496,13 +496,13 @@ export default function App() {
                       {allNames.map(n => <option key={n} value={n}>{n}</option>)}
                     </select>
                   </div>
- 
+
                   {userName && (
                     <>
                       <button style={{ ...S.bs, marginBottom:28 }} onClick={() => setupNotifs(userName)}>
                         {notifEnabled ? "Notifications Active" : "Enable Notifications"}
                       </button>
- 
+
                       {effectiveDays.map(day => {
                         const mySlots = getPersonalSlots(userName).filter(x => x.day === day);
                         return (
@@ -539,7 +539,7 @@ export default function App() {
             }
           </div>
         )}
- 
+
         {/* ── FULL SCHEDULE ── */}
         {view === "full" && hasSchedule && (
           <div>
@@ -555,7 +555,7 @@ export default function App() {
                 </div>
               </div>
             )}
- 
+
             {/* Day selector */}
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20, flexWrap:"wrap", gap:12 }}>
               <h2 style={{ ...S.pt, margin:0 }}>Hourly Schedule</h2>
@@ -574,7 +574,7 @@ export default function App() {
                 ))}
               </div>
             </div>
- 
+
             {/* Schedule grid */}
             {effectiveDay && schedule[effectiveDay] && (
               <div style={S.schedGrid}>
@@ -597,12 +597,12 @@ export default function App() {
             )}
           </div>
         )}
- 
+
       </main>
     </div>
   );
 }
- 
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 function FixedGroup({ label, names, accent }) {
   if (!names?.length) return null;
@@ -615,7 +615,7 @@ function FixedGroup({ label, names, accent }) {
     </div>
   );
 }
- 
+
 function SlotRow({ label, names, accent }) {
   if (!names?.length) return null;
   return (
@@ -625,7 +625,7 @@ function SlotRow({ label, names, accent }) {
     </div>
   );
 }
- 
+
 // ─── STYLES ───────────────────────────────────────────────────────────────────
 const S = {
   root:    { minHeight:"100vh", background:"#0a0a0f", color:"#e8e8f0", fontFamily:"'Courier New','Consolas',monospace", position:"relative" },
@@ -663,8 +663,7 @@ const S = {
   card:    { background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1a1a2a", borderRadius:8, padding:"16px" },
   cardHeader: { fontSize:18, fontWeight:"bold", color:"#f4a261", letterSpacing:2, marginBottom:12, borderBottomWidth:1, borderBottomStyle:"solid", borderBottomColor:"#1a1a2a", paddingBottom:8 },
 };
- 
+
 const _s = document.createElement("style");
 _s.textContent = `@keyframes spin { to { transform: rotate(360deg); } } * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; } select, input, button { font-size: 16px !important; } @media (max-width: 600px) { body { font-size: 14px; } }`;
 document.head.appendChild(_s);
- 
