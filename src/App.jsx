@@ -31,7 +31,7 @@ function normalizeSlot(raw) {
   return raw.trim().replace(/\s*(AM|PM)/gi, "").trim();
 }
 
-function classifyMember(roleRaw, col11, pitProgCert, pitMechCert) {
+function classifyMember(roleRaw, pitProgCert, pitMechCert) {
   const r = (roleRaw || "").trim().toLowerCase();
   let position = "Member";
   if      (r.includes("drive"))          position = "Drive Team";
@@ -39,11 +39,9 @@ function classifyMember(roleRaw, col11, pitProgCert, pitMechCert) {
   else if (r.includes("scouting lead"))  position = "Scouting Lead";
   else if (r.includes("lead"))           position = "Lead Programmer";
 
-  const hasPitProg =
-    (pitProgCert || "").toLowerCase().includes("yes") ||
-    (col11       || "").toLowerCase().includes("option") ||
-    (col11       || "").toLowerCase().includes("yes");
-  const hasPitMech = (pitMechCert || "").toLowerCase().includes("yes");
+  // Strictly col12 for pit prog, col13 for pit mech — no other columns
+  const hasPitProg = (pitProgCert || "").toLowerCase() === "yes";
+  const hasPitMech = (pitMechCert || "").toLowerCase() === "yes";
 
   return { position, hasPitProg, hasPitMech };
 }
@@ -80,11 +78,10 @@ function parseCSV(text) {
     const sunAllDay   = (line[7]  || "").trim().toLowerCase();
     const sunHoursRaw = (line[8]  || "").trim();
     const roleRaw     = (line[10] || "").trim();
-    const col11       = (line[11] || "").trim();
     const pitProgCert = (line[12] || "").trim();
     const pitMechCert = (line[13] || "").trim();
 
-    const { position, hasPitProg, hasPitMech } = classifyMember(roleRaw, col11, pitProgCert, pitMechCert);
+    const { position, hasPitProg, hasPitMech } = classifyMember(roleRaw, pitProgCert, pitMechCert);
 
     const friLower = friArrival.toLowerCase();
     let friSlots = [];
@@ -102,14 +99,8 @@ function parseCSV(text) {
     if (satSlots.length) timingsByDay["Saturday"]  = satSlots;
     if (sunSlots.length) timingsByDay["Sunday"]    = sunSlots;
 
-    if (membersMap[name]) {
-      for (const [day, slots] of Object.entries(timingsByDay)) {
-        if (!membersMap[name].timingsByDay[day]) membersMap[name].timingsByDay[day] = [];
-        for (const s of slots) if (!membersMap[name].timingsByDay[day].includes(s)) membersMap[name].timingsByDay[day].push(s);
-      }
-    } else {
-      membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
-    }
+    // Last submission wins (most recent row overrides earlier duplicate)
+    membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
   }
 
   const fixedRoles = { driveTeam: [], pitCaptain: [], leadProgrammer: [], scoutingLead: [] };
