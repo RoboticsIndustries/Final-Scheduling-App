@@ -127,7 +127,7 @@ function parseCSV(text) {
     }
   }
 
-  const days = ["Friday","Saturday","Sunday"].filter(d => members.some(m => (m.timingsByDay[d] || []).length > 0));
+  const days = ["Saturday","Sunday"].filter(d => members.some(m => (m.timingsByDay[d] || []).length > 0));
   return { members, fixedRoles, days };
 }
 
@@ -140,9 +140,9 @@ function generateSchedule(members, days) {
     schedule[day] = {};
 
     // Reset per-day state
-    for (const m of members) { m.lastPitIdx = -99; m.scoutCount = 0; m.lastScoutIdx = -99; }
+    for (const m of members) { m.lastPitIdx = -99; m.lastScoutIdx = -99; }
 
-    // Build round-robin queues for this day (only members available this day)
+    // Round-robin queues — all certified members available this day
     const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
     let progQueue = dayMembers.filter(m => m.hasPitProg).map(m => m.name);
     let mechQueue = dayMembers.filter(m => m.hasPitMech).map(m => m.name);
@@ -151,83 +151,67 @@ function generateSchedule(members, days) {
 
     for (let i = 0; i < TIME_SLOTS.length; i++) {
       const slot = TIME_SLOTS[i];
-      const avail = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
-      const restedPit = (name) => (i - (byName[name]?.lastPitIdx ?? -99)) > 1;
-      const restedScout = (name) => (i - (byName[name]?.lastScoutIdx ?? -99)) > 0;
+      const avail      = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
+      const restedPit  = (name) => (i - (byName[name]?.lastPitIdx ?? -99)) > 1;
 
-      const pitProg = [], pitMech = [], scouting = [], off = [];
       const used = new Set();
+      let chosenProg = null, chosenMech = null;
 
-      // ── Pick pit programmer (1 per slot) ──
-      let chosenProg = null;
+      // ── 1 pit programmer ──
       if (pinnedSlots.includes(slot)) {
-        // Use first available+rested from pinned prog group
         for (const name of PINNED_PIT_PROG_GROUP) {
           if (avail(name) && restedPit(name)) { chosenProg = name; break; }
         }
       }
       if (!chosenProg) {
-        // Round-robin from progQueue
         for (const name of progQueue) {
           if (avail(name) && restedPit(name)) { chosenProg = name; break; }
         }
       }
       if (chosenProg) {
-        pitProg.push(chosenProg);
         used.add(chosenProg);
         byName[chosenProg].lastPitIdx = i;
         progQueue = [...progQueue.filter(n => n !== chosenProg), chosenProg];
       }
 
-      // ── Pick pit mechanic (1 per slot) ──
-      let chosenMech = null;
+      // ── 1 pit mechanic ──
       if (pinnedSlots.includes(slot)) {
-        // Use first available+rested from pinned mech group
         for (const name of PINNED_PIT_MECH_GROUP) {
           if (avail(name) && restedPit(name) && !used.has(name)) { chosenMech = name; break; }
         }
       }
       if (!chosenMech) {
-        // Round-robin from mechQueue
         for (const name of mechQueue) {
           if (avail(name) && restedPit(name) && !used.has(name)) { chosenMech = name; break; }
         }
       }
       if (chosenMech) {
-        pitMech.push(chosenMech);
         used.add(chosenMech);
         byName[chosenMech].lastPitIdx = i;
         mechQueue = [...mechQueue.filter(n => n !== chosenMech), chosenMech];
       }
 
-      // ── Pick scouts (up to SCOUTING_PER_SLOT from remaining) ──
-      // Prefer those who haven't just scouted
-      const scoutCands = dayMembers
+      // ── 6 scouts, rotating (sort by who scouted least recently) ──
+      const scoutPool = dayMembers
         .filter(m => avail(m.name) && !used.has(m.name))
         .sort((a, b) => (a.lastScoutIdx ?? -99) - (b.lastScoutIdx ?? -99));
-
-      for (const m of scoutCands) {
+      const scouting = [];
+      for (const m of scoutPool) {
         if (scouting.length >= SCOUTING_PER_SLOT) break;
-        if (!restedScout(m.name)) continue;
-        scouting.push(m.name);
-        used.add(m.name);
-        m.lastScoutIdx = i;
-      }
-      // Fill remaining scout spots if we don't have enough rested people
-      for (const m of scoutCands) {
-        if (scouting.length >= SCOUTING_PER_SLOT) break;
-        if (scouting.includes(m.name) || used.has(m.name)) continue;
         scouting.push(m.name);
         used.add(m.name);
         m.lastScoutIdx = i;
       }
 
       // ── Everyone else is off ──
-      for (const m of dayMembers) {
-        if (avail(m.name) && !used.has(m.name)) off.push(m.name);
-      }
+      const off = dayMembers.filter(m => avail(m.name) && !used.has(m.name)).map(m => m.name);
 
-      schedule[day][slot] = { pitProg, pitMech, scouting, off };
+      schedule[day][slot] = {
+        pitProg:  chosenProg ? [chosenProg] : [],
+        pitMech:  chosenMech ? [chosenMech] : [],
+        scouting,
+        off,
+      };
     }
   }
   return schedule;
