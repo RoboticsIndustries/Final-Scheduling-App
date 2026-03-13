@@ -13,7 +13,7 @@ const firebaseApp = initializeApp({
   measurementId: "G-QEZ7P9NZGY"
 });
 const db = getFirestore(firebaseApp);
-const SCHEDULE_DOC = doc(db, "pitsync", "schedule_v4");
+const SCHEDULE_DOC = doc(db, "pitsync", "schedule_v5");
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const SCOUTING_PER_SLOT = 6;
@@ -285,14 +285,18 @@ export default function App() {
     const unsub = onSnapshot(SCHEDULE_DOC, (snap) => {
       if (snap.exists()) {
         const data = snap.data();
-        if (data.schedule)   setSchedule(data.schedule);
+        // Set all state in one batch so nothing renders half-loaded
         if (data.fixedRoles) setFixedRoles(data.fixedRoles);
+        if (data.dayDates)   setDayDates(prev => ({ ...prev, ...data.dayDates }));
         if (data.days && data.days.length > 0) {
           setDays(data.days);
           setSelectedDay(prev => (prev && data.days.includes(prev)) ? prev : data.days[0]);
         }
-        if (data.dayDates) setDayDates(prev => ({ ...prev, ...data.dayDates }));
-        setView(prev => (prev === "loading" || prev === "landing") ? "full" : prev);
+        // Set schedule last — this is what triggers hasSchedule to become true
+        if (data.schedule) {
+          setSchedule(data.schedule);
+          setView("full");
+        }
       } else {
         setView("landing");
       }
@@ -431,14 +435,6 @@ export default function App() {
                 <input type="file" accept=".csv" onChange={handleCSVUpload} style={{ display:"none" }} />
               </label>
               {csvLoaded && <span style={S.ok}>File loaded</span>}
-            </div>
-
-            <div style={S.ib}>
-              <strong style={{ color:"#f4a261" }}>Pinned constraints active:</strong>
-              <p style={{ margin:"8px 0 0", fontSize:"12px", color:"#666", lineHeight:1.8 }}>
-                Slots 10-11 and 1-2 on Sat/Sun: Kunj, Arjun, Sunny, Aadi are pinned to pits together.<br/>
-                Same slots: Aryan, Jake, Shaun are pinned to pits together as pit programmers.
-              </p>
             </div>
 
             {parseError && <div style={S.eb}>{parseError}</div>}
