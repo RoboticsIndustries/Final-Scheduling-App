@@ -1,35 +1,37 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { initializeApp } from "firebase/app";
-import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 
-// ─── FIREBASE ─────────────────────────────────────────────────────────────────
-const firebaseApp = initializeApp({
-  apiKey: "AIzaSyDgV70U0o9hRqKHBrtt2sT26rhY4fY9tFE",
-  authDomain: "final-app-robotics.firebaseapp.com",
-  projectId: "final-app-robotics",
-  storageBucket: "final-app-robotics.firebasestorage.app",
-  messagingSenderId: "765533693519",
-  appId: "1:765533693519:web:949403cf9a8843c8d7ec3a",
-  measurementId: "G-QEZ7P9NZGY"
-});
-const db = getFirestore(firebaseApp);
-const SCHEDULE_DOC = doc(db, "pitsync", "schedule_v5");
+// ─── JSONBIN CONFIG ───────────────────────────────────────────────────────────
+const BIN_ID  = "69b361f5c3097a1dd51e8c8b";
+const API_KEY = "$2a$10$sw7DsOPVqOXjcl1OYlh3Te3ogd1vDTGKkJQNm9E0qb3r9G6uMSGJS";
+const BIN_URL = `https://api.jsonbin.io/v3/b/${BIN_ID}`;
+
+async function loadFromBin() {
+  const res = await fetch(BIN_URL + "/latest", {
+    headers: { "X-Master-Key": API_KEY }
+  });
+  if (!res.ok) throw new Error("Failed to load schedule");
+  const json = await res.json();
+  return json.record;
+}
+
+async function saveToBin(data) {
+  const res = await fetch(BIN_URL, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "X-Master-Key": API_KEY },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) throw new Error("Failed to save schedule");
+  return res.json();
+}
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const SCOUTING_PER_SLOT = 6;
 const TIME_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"];
 
 // ─── PINNED CONSTRAINTS ───────────────────────────────────────────────────────
-// Kunj must be in pits at same time as Aryan, Arjun, Sunny, Aadi
-// Aryan must be in pits at same time as Jake and Shaun
-// Pinned slots chosen where all required members are available
-const PINNED_PIT_SLOTS = {
-  Saturday: ["10-11", "1-2"],
-  Sunday:   ["10-11", "1-2"],
-};
-// Members forced into pits at pinned slots
-const PINNED_PIT_MECH_GROUP  = ["Kunj Tailor", "Arjun Iyer", "Sunny Kota", "Aadi Patel"];
-const PINNED_PIT_PROG_GROUP  = ["Aryan Mitra", "Jake Widmann", "Shaun Mathew"];
+const PINNED_PIT_SLOTS    = { Saturday: ["10-11","1-2"], Sunday: ["10-11","1-2"] };
+const PINNED_PIT_MECH_GROUP = ["Kunj Tailor","Arjun Iyer","Sunny Kota","Aadi Patel"];
+const PINNED_PIT_PROG_GROUP = ["Aryan Mitra","Jake Widmann","Shaun Mathew"];
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 function normalizeSlot(raw) {
@@ -44,13 +46,11 @@ function classifyMember(roleRaw, col11, pitProgCert, pitMechCert) {
   else if (r.includes("scouting lead"))  position = "Scouting Lead";
   else if (r.includes("lead"))           position = "Lead Programmer";
 
-  // Check all cert columns including col11
-  const allCerts = [col11, pitProgCert, pitMechCert].map(c => (c||"").toLowerCase());
-  const hasPitProg = allCerts.some(c => c.includes("yes")) &&
-    !allCerts[2].includes("yes")  // col13 (mech) didn't say yes
-    ? allCerts[0].includes("yes") || allCerts[1].includes("yes") || allCerts[0].includes("option")
-    : (allCerts[1].includes("yes") || allCerts[0].includes("option"));
-  const hasPitMech = allCerts[2].includes("yes");
+  const hasPitProg =
+    (pitProgCert || "").toLowerCase().includes("yes") ||
+    (col11       || "").toLowerCase().includes("option") ||
+    (col11       || "").toLowerCase().includes("yes");
+  const hasPitMech = (pitMechCert || "").toLowerCase().includes("yes");
 
   return { position, hasPitProg, hasPitMech };
 }
@@ -70,20 +70,16 @@ function parseCSVLine(line) {
 function parseCSV(text) {
   const lines = text.trim().split("\n").map(parseCSVLine);
   if (lines.length < 2) return { members: [], fixedRoles: {}, days: [] };
-  const dataLines = lines.slice(1);
   const membersMap = {};
 
-  for (const line of dataLines) {
+  for (const line of lines.slice(1)) {
     if (!line || line.length < 5) continue;
-    const firstName   = (line[1]  || "").trim();
-    const lastName    = (line[2]  || "").trim();
-    const name        = `${firstName} ${lastName}`.trim();
+    const firstName = (line[1] || "").trim();
+    const lastName  = (line[2] || "").trim();
+    const name      = `${firstName} ${lastName}`.trim();
     if (!name) continue;
-
-    // Skip placeholder rows
     const nl = name.toLowerCase();
-    if (nl.includes("filler") || nl.match(/^first\s*\d*\s*last\s*\d*$/i) ||
-        (firstName === "First") || firstName === "" || lastName === "") continue;
+    if (nl.includes("filler") || nl.match(/^first\s*\d*\s*last\s*\d*$/i) || firstName === "First") continue;
 
     const friArrival  = (line[4]  || "").trim();
     const satAllDay   = (line[5]  || "").trim().toLowerCase();
@@ -103,9 +99,9 @@ function parseCSV(text) {
     else if (friLower.includes("5 pm") || friLower.includes("5pm")) friSlots = ["5-6"];
     else if (friLower.startsWith("yes"))                             friSlots = ["4-5","5-6"];
 
-    let satSlots = satAllDay === "yes" ? [...TIME_SLOTS]
+    const satSlots = satAllDay === "yes" ? [...TIME_SLOTS]
       : (satHoursRaw ? satHoursRaw.split(",").map(normalizeSlot).filter(s => TIME_SLOTS.includes(s)) : []);
-    let sunSlots = sunAllDay === "yes" ? [...TIME_SLOTS]
+    const sunSlots = sunAllDay === "yes" ? [...TIME_SLOTS]
       : (sunHoursRaw ? sunHoursRaw.split(",").map(normalizeSlot).filter(s => TIME_SLOTS.includes(s)) : []);
 
     const timingsByDay = {};
@@ -114,17 +110,15 @@ function parseCSV(text) {
     if (sunSlots.length) timingsByDay["Sunday"]    = sunSlots;
 
     if (membersMap[name]) {
-      const ex = membersMap[name];
       for (const [day, slots] of Object.entries(timingsByDay)) {
-        if (!ex.timingsByDay[day]) ex.timingsByDay[day] = [];
-        for (const s of slots) if (!ex.timingsByDay[day].includes(s)) ex.timingsByDay[day].push(s);
+        if (!membersMap[name].timingsByDay[day]) membersMap[name].timingsByDay[day] = [];
+        for (const s of slots) if (!membersMap[name].timingsByDay[day].includes(s)) membersMap[name].timingsByDay[day].push(s);
       }
     } else {
       membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
     }
   }
 
-  // Separate fixed roles (never scheduled per slot) from schedulable members
   const fixedRoles = { driveTeam: [], pitCaptain: [], leadProgrammer: [], scoutingLead: [] };
   const members = [];
 
@@ -135,20 +129,12 @@ function parseCSV(text) {
       case "Scouting Lead":   fixedRoles.scoutingLead.push(name);   break;
       case "Lead Programmer": fixedRoles.leadProgrammer.push(name); break;
       default:
-        members.push({
-          name,
-          hasPitProg: info.hasPitProg,
-          hasPitMech: info.hasPitMech,
-          timingsByDay: info.timingsByDay,
-          lastTask: null,
-          pitCount: 0,
-          scoutCount: 0,
-        });
+        members.push({ name, hasPitProg: info.hasPitProg, hasPitMech: info.hasPitMech,
+          timingsByDay: info.timingsByDay, lastTask: null, pitCount: 0, scoutCount: 0 });
     }
   }
 
-  const daysOrder = ["Friday","Saturday","Sunday"];
-  const days = daysOrder.filter(d => members.some(m => (m.timingsByDay[d] || []).length > 0));
+  const days = ["Friday","Saturday","Sunday"].filter(d => members.some(m => (m.timingsByDay[d] || []).length > 0));
   return { members, fixedRoles, days };
 }
 
@@ -160,83 +146,45 @@ function generateSchedule(members, days) {
   for (const day of days) {
     schedule[day] = {};
     for (const m of members) { m.lastTask = null; m.pitCount = 0; m.scoutCount = 0; }
-
     const pinnedSlots = PINNED_PIT_SLOTS[day] || [];
 
     for (const slot of TIME_SLOTS) {
-      const avail = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
-      const notJustDidPit = (name) => byName[name]?.lastTask !== "Pit";
-
       let rem = members.filter(m => (m.timingsByDay[day] || []).includes(slot));
-      const pitProg  = [];
-      const pitMech  = [];
-      const scouting = [];
-      const off      = [];
+      const pitProg = [], pitMech = [], scouting = [], off = [];
 
       const remove = (m) => { rem = rem.filter(r => r.name !== m.name); };
-      const assign = (m, role) => {
-        m.lastTask = role;
-        if (role === "Pit") m.pitCount++;
-        if (role === "Scout") m.scoutCount++;
-        remove(m);
-      };
+      const assign = (m, role) => { m.lastTask = role; if (role === "Pit") m.pitCount++; if (role === "Scout") m.scoutCount++; remove(m); };
 
-      const isPinned = pinnedSlots.includes(slot);
-
-      if (isPinned) {
-        // ── Pinned slot: force the constrained groups into pits ──
-
-        // Pit prog group: Aryan + Jake + Shaun (if available and not just did pit)
+      if (pinnedSlots.includes(slot)) {
         for (const name of PINNED_PIT_PROG_GROUP) {
           const m = byName[name];
-          if (m && avail(name) && notJustDidPit(name)) {
+          if (m && (m.timingsByDay[day] || []).includes(slot) && m.lastTask !== "Pit") {
             pitProg.push(name); assign(m, "Pit");
           }
         }
-
-        // Pit mech group: Kunj + Arjun + Sunny + Aadi (if available and not just did pit)
         for (const name of PINNED_PIT_MECH_GROUP) {
           const m = byName[name];
-          if (m && avail(name) && notJustDidPit(name)) {
+          if (m && (m.timingsByDay[day] || []).includes(slot) && m.lastTask !== "Pit") {
             pitMech.push(name); assign(m, "Pit");
           }
         }
-
       } else {
-        // ── Normal slot: rotate certified members ──
-
-        // 1 pit programmer (certified, not just rested from pit, not in pinned groups this slot)
-        const progCandidates = rem.filter(m => m.hasPitProg && m.lastTask !== "Pit");
-        if (progCandidates.length > 0) {
-          const m = progCandidates[0];
-          pitProg.push(m.name); assign(m, "Pit");
-        }
-
-        // 1 pit mechanic (certified, not just rested from pit)
-        const mechCandidates = rem.filter(m => m.hasPitMech && m.lastTask !== "Pit");
-        if (mechCandidates.length > 0) {
-          const m = mechCandidates[0];
-          pitMech.push(m.name); assign(m, "Pit");
-        }
+        const progCands = rem.filter(m => m.hasPitProg && m.lastTask !== "Pit");
+        if (progCands.length > 0) { const m = progCands[0]; pitProg.push(m.name); assign(m, "Pit"); }
+        const mechCands = rem.filter(m => m.hasPitMech && m.lastTask !== "Pit");
+        if (mechCands.length > 0) { const m = mechCands[0]; pitMech.push(m.name); assign(m, "Pit"); }
       }
 
-      // Scouting: up to SCOUTING_PER_SLOT from remaining, prefer those who haven't just scouted
-      const scoutPool = [
-        ...rem.filter(m => m.lastTask !== "Scout"),
-        ...rem.filter(m => m.lastTask === "Scout"),
-      ];
+      const scoutPool = [...rem.filter(m => m.lastTask !== "Scout"), ...rem.filter(m => m.lastTask === "Scout")];
       for (const m of scoutPool) {
         if (scouting.length >= SCOUTING_PER_SLOT) break;
         scouting.push(m.name); assign(m, "Scout");
       }
-
-      // Everyone else is off
       for (const m of rem) { off.push(m.name); m.lastTask = "Off"; }
 
       schedule[day][slot] = { pitProg, pitMech, scouting, off };
     }
   }
-
   return schedule;
 }
 
@@ -256,52 +204,42 @@ async function requestNotifPermission() {
   return (await Notification.requestPermission()) === "granted";
 }
 
-// ─── ROLE ACCENT COLORS ───────────────────────────────────────────────────────
-const ACCENT = {
-  "Pit Programmer": "#f4a261",
-  "Pit Mechanic":   "#ff6b35",
-  "Scouting":       "#56cfe1",
-  "Off":            "#444",
-};
+const ACCENT = { "Pit Programmer":"#f4a261", "Pit Mechanic":"#ff6b35", "Scouting":"#56cfe1", "Off":"#444" };
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView]             = useState("loading");
-  const [csvText, setCsvText]       = useState("");
-  const [csvLoaded, setCsvLoaded]   = useState(false);
-  const [schedule, setSchedule]     = useState(null);
-  const [fixedRoles, setFixedRoles] = useState(null);
-  const [days, setDays]             = useState([]);
+  const [view, setView]               = useState("loading");
+  const [csvText, setCsvText]         = useState("");
+  const [csvLoaded, setCsvLoaded]     = useState(false);
+  const [schedule, setSchedule]       = useState(null);
+  const [fixedRoles, setFixedRoles]   = useState(null);
+  const [days, setDays]               = useState([]);
   const [selectedDay, setSelectedDay] = useState(null);
-  const [dayDates, setDayDates]     = useState({ Friday:"", Saturday:"", Sunday:"" });
-  const [userName, setUserName]     = useState(() => localStorage.getItem("frc_user") || "");
+  const [dayDates, setDayDates]       = useState({ Friday:"", Saturday:"", Sunday:"" });
+  const [userName, setUserName]       = useState(() => localStorage.getItem("frc_user") || "");
   const [notifEnabled, setNotifEnabled] = useState(false);
-  const [parseError, setParseError] = useState("");
-  const [syncStatus, setSyncStatus] = useState("idle");
+  const [parseError, setParseError]   = useState("");
+  const [syncStatus, setSyncStatus]   = useState("idle");
   const notifTimers = useRef([]);
 
-  // ── Firestore real-time listener ──
+  // ── Load from JSONBin on mount ──
   useEffect(() => {
-    const unsub = onSnapshot(SCHEDULE_DOC, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        // Set all state in one batch so nothing renders half-loaded
-        if (data.fixedRoles) setFixedRoles(data.fixedRoles);
-        if (data.dayDates)   setDayDates(prev => ({ ...prev, ...data.dayDates }));
-        if (data.days && data.days.length > 0) {
-          setDays(data.days);
-          setSelectedDay(prev => (prev && data.days.includes(prev)) ? prev : data.days[0]);
-        }
-        // Set schedule last — this is what triggers hasSchedule to become true
-        if (data.schedule) {
-          setSchedule(data.schedule);
+    loadFromBin()
+      .then(record => {
+        if (record && record.schedule) {
+          if (record.fixedRoles) setFixedRoles(record.fixedRoles);
+          if (record.dayDates)   setDayDates(prev => ({ ...prev, ...record.dayDates }));
+          if (record.days && record.days.length > 0) {
+            setDays(record.days);
+            setSelectedDay(record.days[0]);
+          }
+          setSchedule(record.schedule);
           setView("full");
+        } else {
+          setView("landing");
         }
-      } else {
-        setView("landing");
-      }
-    }, () => setView("landing"));
-    return () => unsub();
+      })
+      .catch(() => setView("landing"));
   }, []);
 
   const handleCSVUpload = (e) => {
@@ -314,11 +252,15 @@ export default function App() {
   const handleGenerate = async () => {
     if (!csvText) return;
     try {
-      const { members, fixedRoles: fr, days: parsedDays } = parseCSV(csvText);
-      if (!members.length) { setParseError("No schedulable members found."); return; }
-      const sched = generateSchedule(members, parsedDays);
       setSyncStatus("saving");
-      await setDoc(SCHEDULE_DOC, { schedule: sched, fixedRoles: fr, days: parsedDays, dayDates });
+      const { members, fixedRoles: fr, days: parsedDays } = parseCSV(csvText);
+      if (!members.length) { setParseError("No schedulable members found."); setSyncStatus("idle"); return; }
+      const sched = generateSchedule(members, parsedDays);
+      await saveToBin({ schedule: sched, fixedRoles: fr, days: parsedDays, dayDates });
+      setSchedule(sched);
+      setFixedRoles(fr);
+      setDays(parsedDays);
+      setSelectedDay(parsedDays[0]);
       setSyncStatus("saved");
       setParseError("");
       setView("full");
@@ -326,14 +268,13 @@ export default function App() {
     } catch(e) {
       setSyncStatus("error");
       setParseError("Error: " + e.message);
-      console.error(e);
     }
   };
 
   const handleDayDate = async (day, date) => {
     const updated = { ...dayDates, [day]: date };
     setDayDates(updated);
-    try { await setDoc(SCHEDULE_DOC, { schedule, fixedRoles, days, dayDates: updated }); } catch(e) {}
+    try { await saveToBin({ schedule, fixedRoles, days, dayDates: updated }); } catch(e) {}
   };
 
   const allNames = schedule
@@ -350,10 +291,10 @@ export default function App() {
     for (const [day, ds] of Object.entries(schedule))
       for (const [slot, r] of Object.entries(ds)) {
         let role = null;
-        if (r.pitProg?.includes(name))   role = "Pit Programmer";
-        else if (r.pitMech?.includes(name))  role = "Pit Mechanic";
-        else if (r.scouting?.includes(name)) role = "Scouting";
-        else if (r.off?.includes(name))      role = "Off";
+        if      (r.pitProg?.includes(name))   role = "Pit Programmer";
+        else if (r.pitMech?.includes(name))   role = "Pit Mechanic";
+        else if (r.scouting?.includes(name))  role = "Scouting";
+        else if (r.off?.includes(name))       role = "Off";
         if (role) result.push({ day, slot, role });
       }
     return result;
@@ -378,22 +319,19 @@ export default function App() {
   const effectiveDays = days.length > 0 ? days
     : schedule ? ["Friday","Saturday","Sunday"].filter(d => schedule[d] && Object.keys(schedule[d]).length > 0)
     : [];
-  const effectiveDay = (selectedDay && effectiveDays.includes(selectedDay))
-    ? selectedDay : (effectiveDays[0] || null);
-  const hasSchedule = !!schedule && effectiveDays.length > 0;
+  const effectiveDay  = (selectedDay && effectiveDays.includes(selectedDay)) ? selectedDay : (effectiveDays[0] || null);
+  const hasSchedule   = !!schedule && effectiveDays.length > 0;
 
-  // ── Loading ──
   if (view === "loading") return (
     <div style={{ ...S.root, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:16 }}>
       <div style={S.spinner} />
-      <p style={{ color:"#555", fontSize:13, letterSpacing:2 }}>CONNECTING...</p>
+      <p style={{ color:"#555", fontSize:13, letterSpacing:2 }}>LOADING...</p>
     </div>
   );
 
   return (
     <div style={S.root}>
       <div style={S.noise} />
-
       <header style={S.header}>
         <div style={S.hi}>
           <span style={S.logoText}>PITSYNC</span>
@@ -410,7 +348,6 @@ export default function App() {
 
       <main style={S.main}>
 
-        {/* LANDING */}
         {view === "landing" && (
           <div style={{ textAlign:"center", paddingTop:80 }}>
             <h1 style={S.ht}>PITSYNC</h1>
@@ -422,12 +359,10 @@ export default function App() {
           </div>
         )}
 
-        {/* ADMIN */}
         {view === "admin" && (
           <div style={S.panel}>
             <h2 style={S.pt}>Admin</h2>
-            <p style={S.pd}>Upload once. All devices update instantly.</p>
-
+            <p style={S.pd}>Upload once. Everyone sees the schedule instantly.</p>
             <div style={S.fg}>
               <label style={S.lbl}>CSV File</label>
               <label style={S.fu}>
@@ -436,19 +371,15 @@ export default function App() {
               </label>
               {csvLoaded && <span style={S.ok}>File loaded</span>}
             </div>
-
             {parseError && <div style={S.eb}>{parseError}</div>}
-
             <button
               style={{ ...S.bp, opacity:csvLoaded?1:0.4, cursor:csvLoaded?"pointer":"not-allowed" }}
-              onClick={handleGenerate} disabled={!csvLoaded}
-            >
-              {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "Saved" : "Generate & Sync Schedule"}
+              onClick={handleGenerate} disabled={!csvLoaded}>
+              {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "Saved" : "Generate & Save Schedule"}
             </button>
-
             {hasSchedule && (
               <>
-                <div style={S.sb}>Schedule is live. All devices update automatically.</div>
+                <div style={S.sb}>Schedule saved. All devices will load it automatically.</div>
                 <div style={{ marginTop:28 }}>
                   <p style={{ ...S.lbl, marginBottom:14 }}>Competition Dates (for notifications)</p>
                   {["Friday","Saturday","Sunday"].map(day => (
@@ -463,7 +394,6 @@ export default function App() {
           </div>
         )}
 
-        {/* MY SCHEDULE */}
         {view === "personal" && (
           <div style={S.panel}>
             <h2 style={S.pt}>My Schedule</h2>
@@ -516,7 +446,6 @@ export default function App() {
           </div>
         )}
 
-        {/* FULL SCHEDULE */}
         {view === "full" && hasSchedule && (
           <div>
             {fixedRoles && (
@@ -530,7 +459,6 @@ export default function App() {
                 </div>
               </div>
             )}
-
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20, flexWrap:"wrap", gap:12 }}>
               <h2 style={{ ...S.pt, margin:0 }}>Hourly Schedule</h2>
               <div style={{ display:"flex", gap:8 }}>
@@ -543,21 +471,15 @@ export default function App() {
                 ))}
               </div>
             </div>
-
             {effectiveDay && schedule[effectiveDay] && (
               <div style={S.schedGrid}>
                 {TIME_SLOTS.map(slot => {
                   const sr = schedule[effectiveDay][slot];
                   if (!sr) return null;
-                  const anyone = sr.pitProg?.length || sr.pitMech?.length || sr.scouting?.length || sr.off?.length;
-                  if (!anyone) return null;
-                  const isPinned = (PINNED_PIT_SLOTS[effectiveDay] || []).includes(slot);
+                  if (!sr.pitProg?.length && !sr.pitMech?.length && !sr.scouting?.length && !sr.off?.length) return null;
                   return (
-                    <div key={slot} style={{ ...S.card, ...(isPinned ? { borderColor:"#f4a26144" } : {}) }}>
-                      <div style={S.cardHeader}>
-                        {slot}
-                        {isPinned && <span style={{ fontSize:9, color:"#f4a261", letterSpacing:1, marginLeft:8 }}>PINNED</span>}
-                      </div>
+                    <div key={slot} style={S.card}>
+                      <div style={S.cardHeader}>{slot}</div>
                       <SlotRow label="Pit Programmer" names={sr.pitProg}  accent="#f4a261" />
                       <SlotRow label="Pit Mechanic"   names={sr.pitMech}  accent="#ff6b35" />
                       <SlotRow label="Scouting"        names={sr.scouting} accent="#56cfe1" />
@@ -595,7 +517,6 @@ function SlotRow({ label, names, accent }) {
   );
 }
 
-// ─── STYLES ───────────────────────────────────────────────────────────────────
 const S = {
   root:      { minHeight:"100vh", background:"#0a0a0f", color:"#e8e8f0", fontFamily:"'Courier New','Consolas',monospace", position:"relative" },
   noise:     { position:"fixed", inset:0, pointerEvents:"none", zIndex:0, opacity:0.2,
@@ -617,7 +538,6 @@ const S = {
   input:     { width:"100%", background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1e1e2e", color:"#e8e8f0", padding:"10px 14px", borderRadius:6, fontFamily:"inherit", fontSize:13, outline:"none", boxSizing:"border-box" },
   fu:        { display:"inline-flex", alignItems:"center", gap:8, background:"#0f0f16", borderWidth:1, borderStyle:"dashed", borderColor:"#2a2a3e", padding:"10px 18px", borderRadius:6, cursor:"pointer", fontSize:13, color:"#888" },
   ok:        { marginLeft:12, color:"#4ade80", fontSize:11 },
-  ib:        { background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1e1e2e", borderRadius:8, padding:"14px", marginBottom:20, fontSize:12, color:"#666" },
   sb:        { marginTop:16, background:"rgba(74,222,128,0.05)", borderWidth:1, borderStyle:"solid", borderColor:"rgba(74,222,128,0.2)", borderRadius:6, padding:"10px 14px", color:"#4ade80", fontSize:12 },
   eb:        { marginBottom:14, background:"rgba(233,69,96,0.06)", borderWidth:1, borderStyle:"solid", borderColor:"rgba(233,69,96,0.2)", borderRadius:6, padding:"10px 14px", color:"#e94560", fontSize:12 },
   bp:        { background:"#f4a261", color:"#0a0a0f", borderWidth:0, borderStyle:"solid", borderColor:"transparent", padding:"10px 24px", borderRadius:6, cursor:"pointer", fontFamily:"inherit", fontSize:13, fontWeight:"bold", letterSpacing:1 },
@@ -628,7 +548,8 @@ const S = {
   fixedGrid: { display:"flex", flexWrap:"wrap", gap:"20px 40px" },
   schedGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(240px,1fr))", gap:12 },
   card:      { background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1a1a2a", borderRadius:8, padding:"16px" },
-  cardHeader:{ fontSize:18, fontWeight:"bold", color:"#f4a261", letterSpacing:2, marginBottom:12, borderBottomWidth:1, borderBottomStyle:"solid", borderBottomColor:"#1a1a2a", paddingBottom:8, display:"flex", alignItems:"baseline", gap:8 },
+  cardHeader:{ fontSize:18, fontWeight:"bold", color:"#f4a261", letterSpacing:2, marginBottom:12, borderBottomWidth:1, borderBottomStyle:"solid", borderBottomColor:"#1a1a2a", paddingBottom:8 },
+  ib:        { background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1e1e2e", borderRadius:8, padding:"14px", marginBottom:20, fontSize:12, color:"#666" },
 };
 
 const _s = document.createElement("style");
