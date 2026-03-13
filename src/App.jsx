@@ -148,7 +148,7 @@ function generateSchedule(members, days) {
 
       // ── 1 pit programmer (round-robin) ──
       for (const name of progQueue) {
-        if (avail(name) && restedPit(name)) { chosenProg = name; break; }
+        if (avail(name) && (i - (byName[name]?.lastProgIdx ?? -99)) > 1) { chosenProg = name; break; }
       }
       if (chosenProg) {
         used.add(chosenProg);
