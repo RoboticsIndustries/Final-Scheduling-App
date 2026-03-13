@@ -22,9 +22,7 @@ const SCOUTING_PER_SLOT = 6;
 const TIME_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"];
 
 // ─── PINNED CONSTRAINTS ───────────────────────────────────────────────────────
-const PINNED_PIT_SLOTS    = { Saturday: ["10-11","1-2"], Sunday: ["10-11","1-2"] };
-const PINNED_PIT_MECH_GROUP = ["Kunj Tailor","Arjun Iyer","Sunny Kota","Aadi Patel"];
-const PINNED_PIT_PROG_GROUP = ["Aryan Mitra","Jake Widmann","Shaun Mathew"];
+// No pinned constraints — pure round-robin rotation for all certified members
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 function normalizeSlot(raw) {
@@ -138,8 +136,6 @@ function generateSchedule(members, days) {
     let progQueue = dayMembers.filter(m => m.hasPitProg).map(m => m.name);
     let mechQueue = dayMembers.filter(m => m.hasPitMech).map(m => m.name);
 
-    const pinnedSlots = PINNED_PIT_SLOTS[day] || [];
-
     for (let i = 0; i < TIME_SLOTS.length; i++) {
       const slot = TIME_SLOTS[i];
       const avail      = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
@@ -148,16 +144,9 @@ function generateSchedule(members, days) {
       const used = new Set();
       let chosenProg = null, chosenMech = null;
 
-      // ── 1 pit programmer ──
-      if (pinnedSlots.includes(slot)) {
-        for (const name of PINNED_PIT_PROG_GROUP) {
-          if (avail(name) && restedPit(name)) { chosenProg = name; break; }
-        }
-      }
-      if (!chosenProg) {
-        for (const name of progQueue) {
-          if (avail(name) && restedPit(name)) { chosenProg = name; break; }
-        }
+      // ── 1 pit programmer (round-robin) ──
+      for (const name of progQueue) {
+        if (avail(name) && restedPit(name)) { chosenProg = name; break; }
       }
       if (chosenProg) {
         used.add(chosenProg);
@@ -165,16 +154,9 @@ function generateSchedule(members, days) {
         progQueue = [...progQueue.filter(n => n !== chosenProg), chosenProg];
       }
 
-      // ── 1 pit mechanic ──
-      if (pinnedSlots.includes(slot)) {
-        for (const name of PINNED_PIT_MECH_GROUP) {
-          if (avail(name) && restedPit(name) && !used.has(name)) { chosenMech = name; break; }
-        }
-      }
-      if (!chosenMech) {
-        for (const name of mechQueue) {
-          if (avail(name) && restedPit(name) && !used.has(name)) { chosenMech = name; break; }
-        }
+      // ── 1 pit mechanic (round-robin) ──
+      for (const name of mechQueue) {
+        if (avail(name) && restedPit(name) && !used.has(name)) { chosenMech = name; break; }
       }
       if (chosenMech) {
         used.add(chosenMech);
