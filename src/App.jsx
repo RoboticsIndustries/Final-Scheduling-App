@@ -316,6 +316,8 @@ export default function App() {
     }
   }, [getPersonalSlots, dayDates]);
 
+  const handlePrint = () => window.print();
+
   const effectiveDays = days.length > 0 ? days
     : schedule ? ["Friday","Saturday","Sunday"].filter(d => schedule[d] && Object.keys(schedule[d]).length > 0)
     : [];
@@ -449,9 +451,9 @@ export default function App() {
         {view === "full" && hasSchedule && (
           <div>
             {fixedRoles && (
-              <div style={S.fixedBlock}>
-                <div style={S.fixedTitle}>Competition Staff — Present All Weekend</div>
-                <div style={S.fixedGrid}>
+              <div style={S.fixedBlock} className="fixed-block">
+                <div style={S.fixedTitle} className="fixed-title">Competition Staff — Present All Weekend</div>
+                <div style={S.fixedGrid} className="fixed-grid">
                   <FixedGroup label="Drive Team"       names={fixedRoles.driveTeam}      accent="#e94560" />
                   <FixedGroup label="Pit Captain"      names={fixedRoles.pitCaptain}     accent="#ff6b35" />
                   <FixedGroup label="Lead Programmer"  names={fixedRoles.leadProgrammer} accent="#f4a261" />
@@ -461,7 +463,8 @@ export default function App() {
             )}
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20, flexWrap:"wrap", gap:12 }}>
               <h2 style={{ ...S.pt, margin:0 }}>Hourly Schedule</h2>
-              <div style={{ display:"flex", gap:8 }}>
+              <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                <button style={{ ...S.bs, fontSize:11 }} onClick={handlePrint}>Save as PDF</button>
                 {effectiveDays.map(day => (
                   <button key={day} style={{
                     ...S.bs, padding:"6px 16px", fontSize:12,
@@ -472,14 +475,17 @@ export default function App() {
               </div>
             </div>
             {effectiveDay && schedule[effectiveDay] && (
-              <div style={S.schedGrid}>
+              <>
+                <div className="print-title">PitSync — Competition Schedule</div>
+                <div className="print-day">{effectiveDay}</div>
+                <div style={S.schedGrid} className="sched-grid">
                 {TIME_SLOTS.map(slot => {
                   const sr = schedule[effectiveDay][slot];
                   if (!sr) return null;
                   if (!sr.pitProg?.length && !sr.pitMech?.length && !sr.scouting?.length && !sr.off?.length) return null;
                   return (
-                    <div key={slot} style={S.card}>
-                      <div style={S.cardHeader}>{slot}</div>
+                    <div key={slot} style={S.card} className="card">
+                      <div style={S.cardHeader} className="card-header">{slot}</div>
                       <SlotRow label="Pit Programmer" names={sr.pitProg}  accent="#f4a261" />
                       <SlotRow label="Pit Mechanic"   names={sr.pitMech}  accent="#ff6b35" />
                       <SlotRow label="Scouting"        names={sr.scouting} accent="#56cfe1" />
@@ -488,6 +494,7 @@ export default function App() {
                   );
                 })}
               </div>
+              </>
             )}
           </div>
         )}
@@ -501,8 +508,8 @@ function FixedGroup({ label, names, accent }) {
   if (!names?.length) return null;
   return (
     <div style={{ minWidth:140 }}>
-      <div style={{ fontSize:10, letterSpacing:2, textTransform:"uppercase", color:accent, marginBottom:6 }}>{label}</div>
-      {names.map(n => <div key={n} style={{ fontSize:13, color:"#ccc", marginBottom:3 }}>{n}</div>)}
+      <div className="fixed-label" style={{ fontSize:10, letterSpacing:2, textTransform:"uppercase", color:accent, marginBottom:6 }}>{label}</div>
+      {names.map(n => <div key={n} className="fixed-name" style={{ fontSize:13, color:"#ccc", marginBottom:3 }}>{n}</div>)}
     </div>
   );
 }
@@ -511,8 +518,8 @@ function SlotRow({ label, names, accent }) {
   if (!names?.length) return null;
   return (
     <div style={{ marginBottom:10 }}>
-      <div style={{ fontSize:10, letterSpacing:1, textTransform:"uppercase", color:accent, marginBottom:3 }}>{label}</div>
-      <div style={{ fontSize:13, color:"#bbb", lineHeight:1.6 }}>{names.join(", ")}</div>
+      <div className="slot-label" style={{ fontSize:10, letterSpacing:1, textTransform:"uppercase", color:accent, marginBottom:3 }}>{label}</div>
+      <div className="slot-names" style={{ fontSize:13, color:"#bbb", lineHeight:1.6 }}>{names.join(", ")}</div>
     </div>
   );
 }
@@ -553,5 +560,27 @@ const S = {
 };
 
 const _s = document.createElement("style");
-_s.textContent = `@keyframes spin{to{transform:rotate(360deg)}}*{-webkit-tap-highlight-color:transparent;box-sizing:border-box}input,select,button{font-size:16px!important}`;
+_s.textContent = `
+  @keyframes spin{to{transform:rotate(360deg)}}
+  *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
+  input,select,button{font-size:16px!important}
+  @media print {
+    body { background: white !important; color: black !important; font-family: Arial, sans-serif !important; }
+    header, nav, button, .no-print { display: none !important; }
+    #root > div > div:first-child { display: none !important; }
+    .fixed-block { border: 1px solid #ccc !important; border-radius: 4px; padding: 12px; margin-bottom: 16px; background: #f9f9f9 !important; }
+    .fixed-title { color: #333 !important; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 10px; }
+    .fixed-grid { display: flex; flex-wrap: wrap; gap: 20px 40px; }
+    .sched-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .card { border: 1px solid #ddd !important; border-radius: 4px; padding: 10px; break-inside: avoid; background: white !important; }
+    .card-header { font-size: 14px; font-weight: bold; color: #333 !important; border-bottom: 1px solid #eee; padding-bottom: 6px; margin-bottom: 8px; }
+    .slot-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: #666 !important; margin-bottom: 2px; }
+    .slot-names { font-size: 11px; color: #333 !important; line-height: 1.5; }
+    .fixed-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: #666 !important; margin-bottom: 4px; }
+    .fixed-name { font-size: 12px; color: #333 !important; margin-bottom: 2px; }
+    .print-title { display: block !important; font-size: 20px; font-weight: bold; text-align: center; margin-bottom: 4px; color: black !important; }
+    .print-day { display: block !important; font-size: 13px; text-align: center; margin-bottom: 16px; color: #555 !important; }
+  }
+  .print-title, .print-day { display: none; }
+`;
 document.head.appendChild(_s);
