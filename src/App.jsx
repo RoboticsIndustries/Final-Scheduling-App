@@ -1,23 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-// ─── JSONBIN CONFIG ───────────────────────────────────────────────────────────
-const BIN_ID  = "69b361f5c3097a1dd51e8c8b";
-const API_KEY = "$2a$10$sw7DsOPVqOXjcl1OYlh3Te3ogd1vDTGKkJQNm9E0qb3r9G6uMSGJS";
-const BIN_URL = `https://api.jsonbin.io/v3/b/${BIN_ID}`;
-
+// ─── API ─────────────────────────────────────────────────────────────────────
 async function loadFromBin() {
-  const res = await fetch(BIN_URL + "/latest", {
-    headers: { "X-Master-Key": API_KEY }
-  });
+  const res = await fetch("/api/schedule");
   if (!res.ok) throw new Error("Failed to load schedule");
-  const json = await res.json();
-  return json.record;
+  return res.json();
 }
 
 async function saveToBin(data) {
-  const res = await fetch(BIN_URL, {
+  const res = await fetch("/api/schedule", {
     method: "PUT",
-    headers: { "Content-Type": "application/json", "X-Master-Key": API_KEY },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error("Failed to save schedule");
@@ -145,42 +138,94 @@ function generateSchedule(members, days) {
 
   for (const day of days) {
     schedule[day] = {};
-    for (const m of members) { m.lastTask = null; m.pitCount = 0; m.scoutCount = 0; }
+
+    // Reset per-day state
+    for (const m of members) { m.lastPitIdx = -99; m.scoutCount = 0; m.lastScoutIdx = -99; }
+
+    // Build round-robin queues for this day (only members available this day)
+    const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
+    let progQueue = dayMembers.filter(m => m.hasPitProg).map(m => m.name);
+    let mechQueue = dayMembers.filter(m => m.hasPitMech).map(m => m.name);
+
     const pinnedSlots = PINNED_PIT_SLOTS[day] || [];
 
-    for (const slot of TIME_SLOTS) {
-      let rem = members.filter(m => (m.timingsByDay[day] || []).includes(slot));
+    for (let i = 0; i < TIME_SLOTS.length; i++) {
+      const slot = TIME_SLOTS[i];
+      const avail = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
+      const restedPit = (name) => (i - (byName[name]?.lastPitIdx ?? -99)) > 1;
+      const restedScout = (name) => (i - (byName[name]?.lastScoutIdx ?? -99)) > 0;
+
       const pitProg = [], pitMech = [], scouting = [], off = [];
+      const used = new Set();
 
-      const remove = (m) => { rem = rem.filter(r => r.name !== m.name); };
-      const assign = (m, role) => { m.lastTask = role; if (role === "Pit") m.pitCount++; if (role === "Scout") m.scoutCount++; remove(m); };
-
+      // ── Pick pit programmer (1 per slot) ──
+      let chosenProg = null;
       if (pinnedSlots.includes(slot)) {
+        // Use first available+rested from pinned prog group
         for (const name of PINNED_PIT_PROG_GROUP) {
-          const m = byName[name];
-          if (m && (m.timingsByDay[day] || []).includes(slot) && m.lastTask !== "Pit") {
-            pitProg.push(name); assign(m, "Pit");
-          }
+          if (avail(name) && restedPit(name)) { chosenProg = name; break; }
         }
-        for (const name of PINNED_PIT_MECH_GROUP) {
-          const m = byName[name];
-          if (m && (m.timingsByDay[day] || []).includes(slot) && m.lastTask !== "Pit") {
-            pitMech.push(name); assign(m, "Pit");
-          }
+      }
+      if (!chosenProg) {
+        // Round-robin from progQueue
+        for (const name of progQueue) {
+          if (avail(name) && restedPit(name)) { chosenProg = name; break; }
         }
-      } else {
-        const progCands = rem.filter(m => m.hasPitProg && m.lastTask !== "Pit");
-        if (progCands.length > 0) { const m = progCands[0]; pitProg.push(m.name); assign(m, "Pit"); }
-        const mechCands = rem.filter(m => m.hasPitMech && m.lastTask !== "Pit");
-        if (mechCands.length > 0) { const m = mechCands[0]; pitMech.push(m.name); assign(m, "Pit"); }
+      }
+      if (chosenProg) {
+        pitProg.push(chosenProg);
+        used.add(chosenProg);
+        byName[chosenProg].lastPitIdx = i;
+        progQueue = [...progQueue.filter(n => n !== chosenProg), chosenProg];
       }
 
-      const scoutPool = [...rem.filter(m => m.lastTask !== "Scout"), ...rem.filter(m => m.lastTask === "Scout")];
-      for (const m of scoutPool) {
-        if (scouting.length >= SCOUTING_PER_SLOT) break;
-        scouting.push(m.name); assign(m, "Scout");
+      // ── Pick pit mechanic (1 per slot) ──
+      let chosenMech = null;
+      if (pinnedSlots.includes(slot)) {
+        // Use first available+rested from pinned mech group
+        for (const name of PINNED_PIT_MECH_GROUP) {
+          if (avail(name) && restedPit(name) && !used.has(name)) { chosenMech = name; break; }
+        }
       }
-      for (const m of rem) { off.push(m.name); m.lastTask = "Off"; }
+      if (!chosenMech) {
+        // Round-robin from mechQueue
+        for (const name of mechQueue) {
+          if (avail(name) && restedPit(name) && !used.has(name)) { chosenMech = name; break; }
+        }
+      }
+      if (chosenMech) {
+        pitMech.push(chosenMech);
+        used.add(chosenMech);
+        byName[chosenMech].lastPitIdx = i;
+        mechQueue = [...mechQueue.filter(n => n !== chosenMech), chosenMech];
+      }
+
+      // ── Pick scouts (up to SCOUTING_PER_SLOT from remaining) ──
+      // Prefer those who haven't just scouted
+      const scoutCands = dayMembers
+        .filter(m => avail(m.name) && !used.has(m.name))
+        .sort((a, b) => (a.lastScoutIdx ?? -99) - (b.lastScoutIdx ?? -99));
+
+      for (const m of scoutCands) {
+        if (scouting.length >= SCOUTING_PER_SLOT) break;
+        if (!restedScout(m.name)) continue;
+        scouting.push(m.name);
+        used.add(m.name);
+        m.lastScoutIdx = i;
+      }
+      // Fill remaining scout spots if we don't have enough rested people
+      for (const m of scoutCands) {
+        if (scouting.length >= SCOUTING_PER_SLOT) break;
+        if (scouting.includes(m.name) || used.has(m.name)) continue;
+        scouting.push(m.name);
+        used.add(m.name);
+        m.lastScoutIdx = i;
+      }
+
+      // ── Everyone else is off ──
+      for (const m of dayMembers) {
+        if (avail(m.name) && !used.has(m.name)) off.push(m.name);
+      }
 
       schedule[day][slot] = { pitProg, pitMech, scouting, off };
     }
@@ -461,10 +506,9 @@ export default function App() {
                 </div>
               </div>
             )}
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20, flexWrap:"wrap", gap:12 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12, flexWrap:"wrap", gap:12 }}>
               <h2 style={{ ...S.pt, margin:0 }}>Hourly Schedule</h2>
-              <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                <button style={{ ...S.bs, fontSize:11 }} onClick={handlePrint}>Save as PDF</button>
+              <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
                 {effectiveDays.map(day => (
                   <button key={day} style={{
                     ...S.bs, padding:"6px 16px", fontSize:12,
@@ -473,6 +517,9 @@ export default function App() {
                   }} onClick={() => setSelectedDay(day)}>{day}</button>
                 ))}
               </div>
+            </div>
+            <div style={{ marginBottom:20 }} className="no-print">
+              <button style={{ ...S.bp, fontSize:12 }} onClick={handlePrint}>Save as PDF</button>
             </div>
             {effectiveDay && schedule[effectiveDay] && (
               <>
