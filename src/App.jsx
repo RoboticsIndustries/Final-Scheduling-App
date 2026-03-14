@@ -1,16 +1,22 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── API ─────────────────────────────────────────────────────────────────────
+const BIN_ID  = "69b361f5c3097a1dd51e8c8b";
+const API_KEY = "$2a$10$sw7DsOPVqOXjcl1OYlh3Te3ogd1vDTGKkJQNm9E0qb3r9G6uMSGJS";
+const BIN_URL = `https://api.jsonbin.io/v3/b/${BIN_ID}`;
+
 async function loadFromBin() {
-  const res = await fetch("/api/schedule");
+  const res = await fetch(BIN_URL + "/latest", {
+    headers: { "X-Master-Key": API_KEY, "X-Bin-Meta": "false" }
+  });
   if (!res.ok) throw new Error("Failed to load schedule");
   return res.json();
 }
 
 async function saveToBin(data) {
-  const res = await fetch("/api/schedule", {
+  const res = await fetch(BIN_URL, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Master-Key": API_KEY },
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error("Failed to save schedule");
@@ -139,18 +145,20 @@ function generateSchedule(members, days) {
 
   // Build queues ONCE across all days so rotation is continuous Sat→Sun
   // Reset cooldowns only — queue order persists
-  for (const m of members) { m.lastScoutIdx = -99; }
+  for (const m of members) { m.lastScoutIdx = -99; m.lastRecorderIdx = -99; }
   // Prog queue: pit-prog certified, excluding Aryan (not in pits) and Thisath (mech only)
   const PROG_EXCLUDE = new Set(["Aryan Mitra", "Thisath Halambage"]);
   let progQueue = members.filter(m => m.hasPitProg && !PROG_EXCLUDE.has(m.name)).map(m => m.name);
   // Mech queue: pit-mech certified, excluding anyone already in prog queue
   const inProgQueue = new Set(progQueue);
   let mechQueue = members.filter(m => m.hasPitMech && !inProgQueue.has(m.name)).map(m => m.name);
+  // Recorder queue: everyone except Aryan, rotates with gap so no one records all day
+  let recorderQueue = members.filter(m => m.name !== "Aryan Mitra").map(m => m.name);
   for (const day of days) {
     schedule[day] = {};
 
     // Reset cooldowns each day (rest constraint is per-day)
-    for (const m of members) { m.lastScoutIdx = -99; }
+    for (const m of members) { m.lastScoutIdx = -99; m.lastRecorderIdx = -99; }
 
     const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
 
@@ -193,11 +201,18 @@ function generateSchedule(members, days) {
         m.lastScoutIdx = i;
       }
 
-      // ── Everyone else is off — pick 1 as recorder (not Aryan Mitra) ──
+      // ── Everyone else is off — pick 1 as recorder (rotates, min 2-slot gap, not Aryan) ──
       const offAll = dayMembers.filter(m => avail(m.name) && !used.has(m.name)).map(m => m.name);
       let recorder = null;
-      for (const name of offAll) {
-        if (name !== "Aryan Mitra") { recorder = name; break; }
+      for (const name of recorderQueue) {
+        if (offAll.includes(name) && name !== "Aryan Mitra" &&
+            (i - (byName[name]?.lastRecorderIdx ?? -99)) > 2) {
+          recorder = name; break;
+        }
+      }
+      if (recorder) {
+        byName[recorder].lastRecorderIdx = i;
+        recorderQueue = [...recorderQueue.filter(n => n !== recorder), recorder];
       }
       const off = offAll.filter(n => n !== recorder);
 
@@ -229,7 +244,7 @@ async function requestNotifPermission() {
   return (await Notification.requestPermission()) === "granted";
 }
 
-const ACCENT = { "Pit Programmer":"#f4a261", "Pit Mechanic":"#ff6b35", "Scouting":"#56cfe1", "Off":"#444" };
+const ACCENT = { "Pit Programmer":"#f4a261", "Pit Mechanic":"#ff6b35", "Scouting":"#56cfe1", "Recorder":"#a78bfa", "Off":"#888" };
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -516,8 +531,9 @@ export default function App() {
                       <div style={S.cardHeader} className="card-header">{slot}</div>
                       <SlotRow label="Pit Programmer" names={sr.pitProg}  accent="#f4a261" />
                       <SlotRow label="Pit Mechanic"   names={sr.pitMech}  accent="#ff6b35" />
-                      <SlotRow label="Scouting"        names={sr.scouting} accent="#56cfe1" />
-                      <SlotRow label="Off"             names={sr.off}      accent="#444"    />
+                      <SlotRow label="Scouting"        names={sr.scouting}  accent="#56cfe1" />
+                      <SlotRow label="Recorder"        names={sr.recorder} accent="#a78bfa" />
+                      <SlotRow label="Off"             names={sr.off}       accent="#888"    />
                     </div>
                   );
                 })}
