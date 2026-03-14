@@ -129,14 +129,16 @@ function generateSchedule(members, days) {
 
   // Build queues ONCE across all days so rotation is continuous Sat→Sun
   // Reset cooldowns only — queue order persists
-  for (const m of members) { m.lastProgIdx = -99; m.lastMechIdx = -99; m.lastScoutIdx = -99; }
+  for (const m of members) { m.lastScoutIdx = -99; }
   let progQueue = members.filter(m => m.hasPitProg && m.name !== "Aryan Mitra").map(m => m.name);
-  let mechQueue = members.filter(m => m.hasPitMech).map(m => m.name);
+  // Exclude prog+mech dual-certified from mechQueue — they count in prog rotation
+  const progOnly = new Set(progQueue);
+  let mechQueue = members.filter(m => m.hasPitMech && !progOnly.has(m.name)).map(m => m.name);
   for (const day of days) {
     schedule[day] = {};
 
     // Reset cooldowns each day (rest constraint is per-day)
-    for (const m of members) { m.lastProgIdx = -99; m.lastMechIdx = -99; m.lastScoutIdx = -99; }
+    for (const m of members) { m.lastScoutIdx = -99; }
 
     const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
 
@@ -149,26 +151,21 @@ function generateSchedule(members, days) {
       const used = new Set();
       let chosenProg = null, chosenMech = null;
 
-      // ── 1 pit programmer (round-robin) ──
+      // ── 1 pit programmer (round-robin, no rest constraint) ──
       for (const name of progQueue) {
-        if (avail(name) && (i - (byName[name]?.lastProgIdx ?? -99)) > 1) { chosenProg = name; break; }
+        if (avail(name) && !used.has(name)) { chosenProg = name; break; }
       }
       if (chosenProg) {
         used.add(chosenProg);
-        byName[chosenProg].lastProgIdx = i;
         progQueue = [...progQueue.filter(n => n !== chosenProg), chosenProg];
       }
 
-      // ── 1 pit mechanic (round-robin) ──
-      // People who are both prog+mech certified use separate cooldown tracks
-      // so being picked for prog doesn't block them from mech rotation
+      // ── 1 pit mechanic (round-robin, no rest constraint) ──
       for (const name of mechQueue) {
-        const restedMech = (i - (byName[name]?.lastMechIdx ?? -99)) > 1;
-        if (avail(name) && restedMech && !used.has(name)) { chosenMech = name; break; }
+        if (avail(name) && !used.has(name)) { chosenMech = name; break; }
       }
       if (chosenMech) {
         used.add(chosenMech);
-        byName[chosenMech].lastMechIdx = i;
         mechQueue = [...mechQueue.filter(n => n !== chosenMech), chosenMech];
       }
 
