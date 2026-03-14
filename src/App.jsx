@@ -140,10 +140,12 @@ function generateSchedule(members, days) {
   // Build queues ONCE across all days so rotation is continuous Sat→Sun
   // Reset cooldowns only — queue order persists
   for (const m of members) { m.lastScoutIdx = -99; }
-  let progQueue = members.filter(m => m.hasPitProg && m.name !== "Aryan Mitra" && m.name !== "Thisath Halambage").map(m => m.name);
-  // Exclude prog+mech dual-certified from mechQueue — they count in prog rotation
-  const progOnly = new Set(progQueue);
-  let mechQueue = members.filter(m => m.hasPitMech && !progOnly.has(m.name)).map(m => m.name);
+  // Prog queue: pit-prog certified, excluding Aryan (not in pits) and Thisath (mech only)
+  const PROG_EXCLUDE = new Set(["Aryan Mitra", "Thisath Halambage"]);
+  let progQueue = members.filter(m => m.hasPitProg && !PROG_EXCLUDE.has(m.name)).map(m => m.name);
+  // Mech queue: pit-mech certified, excluding anyone already in prog queue
+  const inProgQueue = new Set(progQueue);
+  let mechQueue = members.filter(m => m.hasPitMech && !inProgQueue.has(m.name)).map(m => m.name);
   for (const day of days) {
     schedule[day] = {};
 
@@ -191,13 +193,19 @@ function generateSchedule(members, days) {
         m.lastScoutIdx = i;
       }
 
-      // ── Everyone else is off ──
-      const off = dayMembers.filter(m => avail(m.name) && !used.has(m.name)).map(m => m.name);
+      // ── Everyone else is off — pick 1 as recorder (not Aryan Mitra) ──
+      const offAll = dayMembers.filter(m => avail(m.name) && !used.has(m.name)).map(m => m.name);
+      let recorder = null;
+      for (const name of offAll) {
+        if (name !== "Aryan Mitra") { recorder = name; break; }
+      }
+      const off = offAll.filter(n => n !== recorder);
 
       schedule[day][slot] = {
         pitProg:  chosenProg ? [chosenProg] : [],
         pitMech:  chosenMech ? [chosenMech] : [],
         scouting,
+        recorder: recorder ? [recorder] : [],
         off,
       };
     }
@@ -297,7 +305,7 @@ export default function App() {
   const allNames = schedule
     ? [...new Set(Object.values(schedule).flatMap(ds =>
         Object.values(ds).flatMap(s =>
-          [...(s.pitProg||[]), ...(s.pitMech||[]), ...(s.scouting||[]), ...(s.off||[])]
+          [...(s.pitProg||[]), ...(s.pitMech||[]), ...(s.scouting||[]), ...(s.recorder||[]), ...(s.off||[])]
         )
       ))].sort()
     : [];
@@ -311,6 +319,7 @@ export default function App() {
         if      (r.pitProg?.includes(name))   role = "Pit Programmer";
         else if (r.pitMech?.includes(name))   role = "Pit Mechanic";
         else if (r.scouting?.includes(name))  role = "Scouting";
+        else if (r.recorder?.includes(name))  role = "Recorder";
         else if (r.off?.includes(name))       role = "Off";
         if (role) result.push({ day, slot, role });
       }
