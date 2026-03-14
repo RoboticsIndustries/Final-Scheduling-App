@@ -158,7 +158,8 @@ function generateSchedule(members, days) {
   let progQueue = members.filter(m => m.hasPitProg && !PROG_EXCLUDE.has(m.name)).map(m => m.name);
   // Mech queue: pit-mech certified, excluding anyone in prog queue (but Kartik can still be mech)
   const inProgQueue = new Set(progQueue);
-  let mechQueue = members.filter(m => m.hasPitMech && !inProgQueue.has(m.name)).map(m => m.name);
+  // Also exclude Kartik from mech — he is prog only
+  let mechQueue = members.filter(m => m.hasPitMech && !inProgQueue.has(m.name) && m.name !== "Kartik Gupta").map(m => m.name);
   // Recorder queue: everyone except Aryan, rotates with gap so no one records all day
   let recorderQueue = members.filter(m => m.name !== "Aryan Mitra").map(m => m.name);
   for (const day of days) {
