@@ -99,8 +99,18 @@ function parseCSV(text) {
     if (satSlots.length) timingsByDay["Saturday"]  = satSlots;
     if (sunSlots.length) timingsByDay["Sunday"]    = sunSlots;
 
-    // Last submission wins (most recent row overrides earlier duplicate)
-    membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
+    if (membersMap[name]) {
+      // Merge: keep cert if ANY submission says yes, merge availability slots
+      const ex = membersMap[name];
+      ex.hasPitProg = ex.hasPitProg || hasPitProg;
+      ex.hasPitMech = ex.hasPitMech || hasPitMech;
+      for (const [day, slots] of Object.entries(timingsByDay)) {
+        if (!ex.timingsByDay[day]) ex.timingsByDay[day] = [];
+        for (const s of slots) if (!ex.timingsByDay[day].includes(s)) ex.timingsByDay[day].push(s);
+      }
+    } else {
+      membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
+    }
   }
 
   const fixedRoles = { driveTeam: [], pitCaptain: [], leadProgrammer: [], scoutingLead: [] };
@@ -130,7 +140,7 @@ function generateSchedule(members, days) {
   // Build queues ONCE across all days so rotation is continuous Sat→Sun
   // Reset cooldowns only — queue order persists
   for (const m of members) { m.lastScoutIdx = -99; }
-  let progQueue = members.filter(m => m.hasPitProg && m.name !== "Aryan Mitra").map(m => m.name);
+  let progQueue = members.filter(m => m.hasPitProg && m.name !== "Aryan Mitra" && m.name !== "Thisath Halambage").map(m => m.name);
   // Exclude prog+mech dual-certified from mechQueue — they count in prog rotation
   const progOnly = new Set(progQueue);
   let mechQueue = members.filter(m => m.hasPitMech && !progOnly.has(m.name)).map(m => m.name);
