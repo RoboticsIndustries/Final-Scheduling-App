@@ -146,10 +146,17 @@ function generateSchedule(members, days) {
   // Build queues ONCE across all days so rotation is continuous Sat→Sun
   // Reset cooldowns only — queue order persists
   for (const m of members) { m.lastScoutIdx = -99; m.lastRecorderIdx = -99; }
-  // Prog queue: pit-prog certified, excluding Aryan (not in pits) and Thisath (mech only)
-  const PROG_EXCLUDE = new Set(["Aryan Mitra", "Thisath Halambage"]);
+  // Pinned pit programmer assignments
+  const PINNED_PROG = {
+    "11-12": "Aryan Mitra",
+    "1-2":   "Kartik Gupta",
+    "3-4":   "Kartik Gupta",
+  };
+
+  // Prog queue: exclude Aryan, Thisath, and Kartik (they are pinned manually)
+  const PROG_EXCLUDE = new Set(["Aryan Mitra", "Thisath Halambage", "Kartik Gupta"]);
   let progQueue = members.filter(m => m.hasPitProg && !PROG_EXCLUDE.has(m.name)).map(m => m.name);
-  // Mech queue: pit-mech certified, excluding anyone already in prog queue
+  // Mech queue: pit-mech certified, excluding anyone in prog queue (but Kartik can still be mech)
   const inProgQueue = new Set(progQueue);
   let mechQueue = members.filter(m => m.hasPitMech && !inProgQueue.has(m.name)).map(m => m.name);
   // Recorder queue: everyone except Aryan, rotates with gap so no one records all day
@@ -171,14 +178,19 @@ function generateSchedule(members, days) {
       const used = new Set();
       let chosenProg = null, chosenMech = null;
 
-      // ── 1 pit programmer (round-robin, no rest constraint) ──
-      for (const name of progQueue) {
-        if (avail(name) && !used.has(name)) { chosenProg = name; break; }
+      // ── 1 pit programmer (pinned first, then round-robin) ──
+      const pinnedProg = PINNED_PROG[slot];
+      if (pinnedProg && avail(pinnedProg)) {
+        chosenProg = pinnedProg;
+      } else if (!pinnedProg) {
+        for (const name of progQueue) {
+          if (avail(name) && !used.has(name)) { chosenProg = name; break; }
+        }
       }
-      if (chosenProg) {
-        used.add(chosenProg);
+      if (chosenProg && !pinnedProg) {
         progQueue = [...progQueue.filter(n => n !== chosenProg), chosenProg];
       }
+      if (chosenProg) used.add(chosenProg);
 
       // ── 1 pit mechanic (round-robin, no rest constraint) ──
       for (const name of mechQueue) {
