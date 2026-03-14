@@ -1,443 +1,472 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-// ─── CONSTANTS ───────────────────────────────────────────────────────────────
-const PITS_LIMIT = 3;
-const SCOUTING_LIMIT = 5;
-const DRIVE_LIMIT = 2;
-const MEMBER_PITS_MAX = 2;
-const LEADS_PITS_MAX = 4;
-const SCOUTING_MAX = 3;
+// ─── API ─────────────────────────────────────────────────────────────────────
+async function loadFromBin() {
+  const res = await fetch("/api/schedule");
+  if (!res.ok) throw new Error("Failed to load schedule");
+  return res.json();
+}
 
+async function saveToBin(data) {
+  const res = await fetch("/api/schedule", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) throw new Error("Failed to save schedule");
+  return res.json();
+}
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const SCOUTING_PER_SLOT = 6;
 const TIME_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"];
+const SUNDAY_SLOTS = ["8-9","9-10","10-11","11-12","12-1"];
 
-const POSITION_PRIORITY = { "Drive Team": 4, "Pit Captain": 3, "Scouting Lead": 3, "Lead": 2, "Member": 1 };
 
-// ─── TEAM MEMBER CLASS ────────────────────────────────────────────────────────
-class TeamMember {
-  constructor(name, availableTimings, position) {
-    this.name = name;
-    this.availableTimings = availableTimings.map(t => t.trim());
-    this.position = position.trim();
-    this.timesUsed = 0;
-    this.pitsCount = 0;
-    this.scoutingCount = 0;
-    this.lastTask = null;
-  }
-  canDo(role) {
-    if (role === "Stands") return true;
-    if (this.lastTask === role) return false;
-    if (this.position === "Drive Team" && role !== "Drive Team") return false;
-    return true;
-  }
-  assign(role) {
-    this.timesUsed++;
-    this.lastTask = role;
-    if (role === "Pits" || role === "Pit Captain") this.pitsCount++;
-    if (role === "Scouting" || role === "Scouting Lead") this.scoutingCount++;
-  }
+// ─── PINNED CONSTRAINTS ───────────────────────────────────────────────────────
+// No pinned constraints — pure round-robin rotation for all certified members
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function normalizeSlot(raw) {
+  return raw.trim().replace(/\s*(AM|PM)/gi, "").trim();
+}
+
+function classifyMember(roleRaw, pitProgCert, pitMechCert) {
+  const r = (roleRaw || "").trim().toLowerCase();
+  let position = "Member";
+  if      (r.includes("drive"))          position = "Drive Team";
+  else if (r.includes("pit captain"))    position = "Pit Captain";
+  else if (r.includes("scouting lead"))  position = "Scouting Lead";
+  else if (r.includes("lead"))           position = "Lead Programmer";
+
+  // Strictly col12 for pit prog, col13 for pit mech — no other columns
+  const hasPitProg = (pitProgCert || "").toLowerCase() === "yes";
+  const hasPitMech = (pitMechCert || "").toLowerCase() === "yes";
+
+  return { position, hasPitProg, hasPitMech };
 }
 
 // ─── CSV PARSER ───────────────────────────────────────────────────────────────
-function parseCSV(text) {
-  const lines = text.trim().split("\n");
-  const membersMap = {};
-  let competitionDate = null;
-
-  const isHeader = (row) => row.some(c => /name|position|timing/i.test(c));
-
-  let dataLines = lines.map(l => {
-    // handle quoted CSV fields
-    const cols = [];
-    let cur = "", inQ = false;
-    for (let ch of l) {
-      if (ch === '"') { inQ = !inQ; }
-      else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ""; }
-      else cur += ch;
-    }
-    cols.push(cur.trim());
-    return cols;
-  });
-
-  if (dataLines.length > 0 && isHeader(dataLines[0])) {
-    // check if there's a date column in header
-    const header = dataLines[0];
-    const dateIdx = header.findIndex(h => /date|competition/i.test(h));
-    if (dateIdx >= 0 && dataLines[1]) {
-      competitionDate = dataLines[1][dateIdx];
-    }
-    dataLines = dataLines.slice(1);
+function parseCSVLine(line) {
+  const cols = []; let cur = "", inQ = false;
+  for (const ch of line) {
+    if      (ch === '"')           { inQ = !inQ; }
+    else if (ch === ',' && !inQ)   { cols.push(cur.trim()); cur = ""; }
+    else                           { cur += ch; }
   }
+  cols.push(cur.trim());
+  return cols;
+}
 
-  for (const line of dataLines) {
-    if (!line || line.length < 4) continue;
-    const name = line[1]?.trim();
-    const position = (line[2]?.trim() || "Member");
-    const timingsRaw = line[3] || "";
-    const timings = timingsRaw.split(",").map(t => t.trim()).filter(Boolean);
+function parseCSV(text) {
+  const lines = text.trim().split("\n").map(parseCSVLine);
+  if (lines.length < 2) return { members: [], fixedRoles: {}, days: [] };
+  const membersMap = {};
 
+  for (const line of lines.slice(1)) {
+    if (!line || line.length < 5) continue;
+    const firstName = (line[1] || "").trim();
+    const lastName  = (line[2] || "").trim();
+    const name      = `${firstName} ${lastName}`.trim();
     if (!name) continue;
+    const nl = name.toLowerCase();
+    if (nl.includes("filler") || nl.match(/^first\s*\d*\s*last\s*\d*$/i) || firstName === "First") continue;
+
+    const friArrival  = (line[4]  || "").trim();
+    const satAllDay   = (line[5]  || "").trim().toLowerCase();
+    const satHoursRaw = (line[6]  || "").trim();
+    const sunAllDay   = (line[7]  || "").trim().toLowerCase();
+    const sunHoursRaw = (line[8]  || "").trim();
+    const roleRaw     = (line[10] || "").trim();
+    const pitProgCert = (line[12] || "").trim();
+    const pitMechCert = (line[13] || "").trim();
+
+    const { position, hasPitProg, hasPitMech } = classifyMember(roleRaw, pitProgCert, pitMechCert);
+
+    const friLower = friArrival.toLowerCase();
+    let friSlots = [];
+    if      (friLower.includes("4 pm") || friLower.includes("4pm")) friSlots = ["4-5","5-6"];
+    else if (friLower.includes("5 pm") || friLower.includes("5pm")) friSlots = ["5-6"];
+    else if (friLower.startsWith("yes"))                             friSlots = ["4-5","5-6"];
+
+    const satSlots = satAllDay === "yes" ? [...TIME_SLOTS]
+      : (satHoursRaw ? satHoursRaw.split(",").map(normalizeSlot).filter(s => TIME_SLOTS.includes(s)) : []);
+    const sunSlots = sunAllDay === "yes" ? [...TIME_SLOTS]
+      : (sunHoursRaw ? sunHoursRaw.split(",").map(normalizeSlot).filter(s => TIME_SLOTS.includes(s)) : []);
+
+    const timingsByDay = {};
+    if (friSlots.length) timingsByDay["Friday"]   = friSlots;
+    if (satSlots.length) timingsByDay["Saturday"]  = satSlots;
+    if (sunSlots.length) timingsByDay["Sunday"]    = sunSlots;
 
     if (membersMap[name]) {
+      // Merge: keep cert if ANY submission says yes, merge availability slots
       const ex = membersMap[name];
-      for (const t of timings) if (!ex.timings.includes(t)) ex.timings.push(t);
-      if ((POSITION_PRIORITY[position] || 0) > (POSITION_PRIORITY[ex.position] || 0)) {
-        ex.position = position;
+      ex.hasPitProg = ex.hasPitProg || hasPitProg;
+      ex.hasPitMech = ex.hasPitMech || hasPitMech;
+      for (const [day, slots] of Object.entries(timingsByDay)) {
+        if (!ex.timingsByDay[day]) ex.timingsByDay[day] = [];
+        for (const s of slots) if (!ex.timingsByDay[day].includes(s)) ex.timingsByDay[day].push(s);
       }
     } else {
-      membersMap[name] = { position, timings };
+      membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
     }
   }
 
-  const members = Object.entries(membersMap).map(([name, info]) =>
-    new TeamMember(name, info.timings, info.position)
-  );
+  const fixedRoles = { driveTeam: [], pitCaptain: [], leadProgrammer: [], scoutingLead: [] };
+  const members = [];
 
-  return { members, competitionDate };
+  for (const [name, info] of Object.entries(membersMap)) {
+    switch (info.position) {
+      case "Drive Team":      fixedRoles.driveTeam.push(name);      break;
+      case "Pit Captain":     fixedRoles.pitCaptain.push(name);     break;
+      case "Scouting Lead":   fixedRoles.scoutingLead.push(name);   break;
+      case "Lead Programmer": fixedRoles.leadProgrammer.push(name); break;
+      default:
+        members.push({ name, hasPitProg: info.hasPitProg, hasPitMech: info.hasPitMech,
+          timingsByDay: info.timingsByDay, lastTask: null, pitCount: 0, scoutCount: 0 });
+    }
+  }
+
+  const days = ["Saturday","Sunday"].filter(d => members.some(m => (m.timingsByDay[d] || []).length > 0));
+  return { members, fixedRoles, days };
 }
 
 // ─── SCHEDULER ────────────────────────────────────────────────────────────────
-function generateSchedule(members) {
+function generateSchedule(members, days) {
   const schedule = {};
+  const byName = Object.fromEntries(members.map(m => [m.name, m]));
 
-  for (const slot of TIME_SLOTS) {
-    const available = members.filter(m => m.availableTimings.includes(slot));
-    let remaining = [...available];
+  // Build queues ONCE across all days so rotation is continuous Sat→Sun
+  // Reset cooldowns only — queue order persists
+  for (const m of members) { m.lastScoutIdx = -99; }
+  // Prog queue: pit-prog certified, excluding Aryan (not in pits) and Thisath (mech only)
+  const PROG_EXCLUDE = new Set(["Aryan Mitra", "Thisath Halambage"]);
+  let progQueue = members.filter(m => m.hasPitProg && !PROG_EXCLUDE.has(m.name)).map(m => m.name);
+  // Mech queue: pit-mech certified, excluding anyone already in prog queue
+  const inProgQueue = new Set(progQueue);
+  let mechQueue = members.filter(m => m.hasPitMech && !inProgQueue.has(m.name)).map(m => m.name);
+  for (const day of days) {
+    schedule[day] = {};
 
-    const pits = [], scouting = [], driveTeam = [], stands = [];
-    let pitCaptain = null, scoutingLead = null;
+    // Reset cooldowns each day (rest constraint is per-day)
+    for (const m of members) { m.lastScoutIdx = -99; }
 
-    // 1) Drive Team
-    const driveCandidates = remaining.filter(m => m.position === "Drive Team" && m.canDo("Drive Team"));
-    for (const m of driveCandidates.slice(0, DRIVE_LIMIT)) {
-      driveTeam.push(m.name); m.assign("Drive Team");
-      remaining = remaining.filter(r => r.name !== m.name);
+    const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
+
+    const daySlots = day === "Sunday" ? SUNDAY_SLOTS : TIME_SLOTS;
+    for (let i = 0; i < daySlots.length; i++) {
+      const slot = daySlots[i];
+      const avail      = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
+
+
+      const used = new Set();
+      let chosenProg = null, chosenMech = null;
+
+      // ── 1 pit programmer (round-robin, no rest constraint) ──
+      for (const name of progQueue) {
+        if (avail(name) && !used.has(name)) { chosenProg = name; break; }
+      }
+      if (chosenProg) {
+        used.add(chosenProg);
+        progQueue = [...progQueue.filter(n => n !== chosenProg), chosenProg];
+      }
+
+      // ── 1 pit mechanic (round-robin, no rest constraint) ──
+      for (const name of mechQueue) {
+        if (avail(name) && !used.has(name)) { chosenMech = name; break; }
+      }
+      if (chosenMech) {
+        used.add(chosenMech);
+        mechQueue = [...mechQueue.filter(n => n !== chosenMech), chosenMech];
+      }
+
+      // ── 6 scouts, rotating (sort by who scouted least recently) ──
+      const scoutPool = dayMembers
+        .filter(m => avail(m.name) && !used.has(m.name))
+        .sort((a, b) => (a.lastScoutIdx ?? -99) - (b.lastScoutIdx ?? -99));
+      const scouting = [];
+      for (const m of scoutPool) {
+        if (scouting.length >= SCOUTING_PER_SLOT) break;
+        scouting.push(m.name);
+        used.add(m.name);
+        m.lastScoutIdx = i;
+      }
+
+      // ── Everyone else is off — pick 1 as recorder (not Aryan Mitra) ──
+      const offAll = dayMembers.filter(m => avail(m.name) && !used.has(m.name)).map(m => m.name);
+      let recorder = null;
+      for (const name of offAll) {
+        if (name !== "Aryan Mitra") { recorder = name; break; }
+      }
+      const off = offAll.filter(n => n !== recorder);
+
+      schedule[day][slot] = {
+        pitProg:  chosenProg ? [chosenProg] : [],
+        pitMech:  chosenMech ? [chosenMech] : [],
+        scouting,
+        recorder: recorder ? [recorder] : [],
+        off,
+      };
     }
-
-    // 2) Pit Captain (fixed role, assign to pits slot with special label)
-    const pitCaptainMember = remaining.find(m => m.position === "Pit Captain" && m.canDo("Pit Captain"));
-    if (pitCaptainMember) {
-      pitCaptain = pitCaptainMember.name;
-      pitCaptainMember.assign("Pit Captain");
-      remaining = remaining.filter(r => r.name !== pitCaptainMember.name);
-    }
-
-    // 3) Scouting Lead
-    const scoutLeadMember = remaining.find(m => m.position === "Scouting Lead" && m.canDo("Scouting Lead"));
-    if (scoutLeadMember) {
-      scoutingLead = scoutLeadMember.name;
-      scoutLeadMember.assign("Scouting Lead");
-      remaining = remaining.filter(r => r.name !== scoutLeadMember.name);
-    }
-
-    // 4) Pits: Leads first
-    const leadPits = remaining.filter(m => m.position === "Lead" && m.canDo("Pits") && m.pitsCount < LEADS_PITS_MAX);
-    for (const m of leadPits) {
-      if (pits.length >= PITS_LIMIT) break;
-      pits.push(m.name); m.assign("Pits");
-      remaining = remaining.filter(r => r.name !== m.name);
-    }
-    // Members for pits
-    const memberPits = remaining.filter(m => m.position === "Member" && m.canDo("Pits") && m.pitsCount < MEMBER_PITS_MAX);
-    for (const m of memberPits) {
-      if (pits.length >= PITS_LIMIT) break;
-      pits.push(m.name); m.assign("Pits");
-      remaining = remaining.filter(r => r.name !== m.name);
-    }
-
-    // 5) Scouting
-    const scoutCandidates = remaining.filter(m => m.canDo("Scouting") && m.scoutingCount < SCOUTING_MAX);
-    for (const m of scoutCandidates) {
-      if (scouting.length >= SCOUTING_LIMIT) break;
-      scouting.push(m.name); m.assign("Scouting");
-      remaining = remaining.filter(r => r.name !== m.name);
-    }
-
-    // 6) Stands
-    for (const m of remaining) {
-      stands.push(m.name); m.assign("Stands");
-    }
-
-    schedule[slot] = { pits, scouting, driveTeam, stands, pitCaptain, scoutingLead };
   }
-
   return schedule;
 }
 
-// ─── NOTIFICATION HELPERS ─────────────────────────────────────────────────────
-function parseSlotTime(slot, competitionDate) {
-  if (!competitionDate) return null;
-  const base = new Date(competitionDate);
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+function parseSlotTime(day, slot, dayDates) {
+  const dateStr = dayDates[day]; if (!dateStr) return null;
+  const base = new Date(dateStr + "T00:00:00");
   if (isNaN(base)) return null;
-  const startHour = parseInt(slot.split("-")[0]);
-  const hour = startHour < 8 ? startHour + 12 : startHour; // handle PM (1-6 = 13-18)
-  base.setHours(hour, 0, 0, 0);
+  const startH = parseInt(slot.split("-")[0]);
+  base.setHours((startH >= 1 && startH <= 7) ? startH + 12 : startH, 0, 0, 0);
   return base;
 }
 
-async function requestNotificationPermission() {
+async function requestNotifPermission() {
   if (!("Notification" in window)) return false;
   if (Notification.permission === "granted") return true;
-  const result = await Notification.requestPermission();
-  return result === "granted";
+  return (await Notification.requestPermission()) === "granted";
 }
 
-function scheduleNotification(title, body, fireAt) {
-  const now = Date.now();
-  const delay = fireAt - now;
-  if (delay < 0) return null;
-  return setTimeout(() => {
-    if (Notification.permission === "granted") {
-      new Notification(title, { body, icon: "⚙️" });
-    }
-  }, delay);
-}
+const ACCENT = { "Pit Programmer":"#f4a261", "Pit Mechanic":"#ff6b35", "Scouting":"#56cfe1", "Off":"#444" };
 
-// ─── ROLE COLOR MAP ───────────────────────────────────────────────────────────
-const ROLE_STYLES = {
-  "Drive Team":   { bg: "#1a1a2e", accent: "#e94560", label: "Drive Team" },
-  "Pits":         { bg: "#0f2027", accent: "#f4a261", label: "Pits" },
-  "Pit Captain":  { bg: "#0f2027", accent: "#ff6b35", label: "Pit Captain ★" },
-  "Scouting":     { bg: "#1b2838", accent: "#56cfe1", label: "Scouting" },
-  "Scouting Lead":{ bg: "#1b2838", accent: "#0096ff", label: "Scouting Lead ★" },
-  "Stands":       { bg: "#1a1a2e", accent: "#8338ec", label: "Stands" },
-};
-
-// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [view, setView] = useState("landing"); // landing | admin | personal
-  const [csvText, setCsvText] = useState("");
-  const [schedule, setSchedule] = useState(null);
-  const [competitionDate, setCompetitionDate] = useState("");
-  const [userName, setUserName] = useState(() => localStorage.getItem("frc_user") || "");
+  const [view, setView]               = useState("loading");
+  const [csvText, setCsvText]         = useState("");
+  const [csvLoaded, setCsvLoaded]     = useState(false);
+  const [schedule, setSchedule]       = useState(null);
+  const [fixedRoles, setFixedRoles]   = useState(null);
+  const [days, setDays]               = useState([]);
+  const [selectedDay, setSelectedDay] = useState(null);
+  const [dayDates, setDayDates]       = useState({ Friday:"", Saturday:"", Sunday:"" });
+  const [userName, setUserName]       = useState(() => localStorage.getItem("frc_user") || "");
   const [notifEnabled, setNotifEnabled] = useState(false);
-  const [adminKey] = useState("frc_admin_schedule");
+  const [parseError, setParseError]   = useState("");
+  const [syncStatus, setSyncStatus]   = useState("idle");
   const notifTimers = useRef([]);
 
-  // Load saved schedule from storage
+  // ── Load from JSONBin on mount ──
   useEffect(() => {
-    const saved = localStorage.getItem("frc_schedule");
-    const savedDate = localStorage.getItem("frc_comp_date");
-    if (saved) { setSchedule(JSON.parse(saved)); }
-    if (savedDate) setCompetitionDate(savedDate);
+    loadFromBin()
+      .then(record => {
+        if (record && record.schedule) {
+          if (record.fixedRoles) setFixedRoles(record.fixedRoles);
+          if (record.dayDates)   setDayDates(prev => ({ ...prev, ...record.dayDates }));
+          if (record.days && record.days.length > 0) {
+            setDays(record.days);
+            setSelectedDay(record.days[0]);
+          }
+          setSchedule(record.schedule);
+          setView("full");
+        } else {
+          setView("landing");
+        }
+      })
+      .catch(() => setView("landing"));
   }, []);
 
-  // Handle CSV upload
   const handleCSVUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => setCsvText(ev.target.result);
+    reader.onload = (ev) => { setCsvText(ev.target.result); setCsvLoaded(true); setParseError(""); };
     reader.readAsText(file);
   };
 
-  const handleGenerateSchedule = () => {
+  const handleGenerate = async () => {
     if (!csvText) return;
-    const { members, competitionDate: csvDate } = parseCSV(csvText);
-    const sched = generateSchedule(members);
-    setSchedule(sched);
-    localStorage.setItem("frc_schedule", JSON.stringify(sched));
-    const finalDate = competitionDate || csvDate || "";
-    if (finalDate) {
-      setCompetitionDate(finalDate);
-      localStorage.setItem("frc_comp_date", finalDate);
+    try {
+      setSyncStatus("saving");
+      const { members, fixedRoles: fr, days: parsedDays } = parseCSV(csvText);
+      if (!members.length) { setParseError("No schedulable members found."); setSyncStatus("idle"); return; }
+      const sched = generateSchedule(members, parsedDays);
+      await saveToBin({ schedule: sched, fixedRoles: fr, days: parsedDays, dayDates });
+      setSchedule(sched);
+      setFixedRoles(fr);
+      setDays(parsedDays);
+      setSelectedDay(parsedDays[0]);
+      setSyncStatus("saved");
+      setParseError("");
+      setView("full");
+      setTimeout(() => setSyncStatus("idle"), 3000);
+    } catch(e) {
+      setSyncStatus("error");
+      setParseError("Error: " + e.message);
     }
   };
 
-  // Get personal schedule for a user
-  const getPersonalSlots = useCallback((name) => {
-    if (!schedule || !name) return [];
-    const slots = [];
-    for (const [slot, roles] of Object.entries(schedule)) {
-      let role = null;
-      if (roles.driveTeam?.includes(name)) role = "Drive Team";
-      else if (roles.pitCaptain === name) role = "Pit Captain";
-      else if (roles.scoutingLead === name) role = "Scouting Lead";
-      else if (roles.pits?.includes(name)) role = "Pits";
-      else if (roles.scouting?.includes(name)) role = "Scouting";
-      else if (roles.stands?.includes(name)) role = "Stands";
-      if (role) slots.push({ slot, role });
-    }
-    return slots;
-  }, [schedule]);
-
-  // Setup notifications
-  const setupNotifications = useCallback(async (name) => {
-    const granted = await requestNotificationPermission();
-    if (!granted) return;
-    setNotifEnabled(true);
-    // clear old timers
-    notifTimers.current.forEach(clearTimeout);
-    notifTimers.current = [];
-
-    const personalSlots = getPersonalSlots(name);
-    for (const { slot, role } of personalSlots) {
-      const slotTime = parseSlotTime(slot, competitionDate);
-      if (!slotTime) continue;
-      // notify 10 min before
-      const fireAt = slotTime.getTime() - 10 * 60 * 1000;
-      const t = scheduleNotification(
-        `⚙️ FRC Schedule Reminder`,
-        `You're on ${role} at ${slot}. Get ready!`,
-        fireAt
-      );
-      if (t) notifTimers.current.push(t);
-    }
-  }, [getPersonalSlots, competitionDate]);
-
-  const handleUserLogin = (name) => {
-    setUserName(name);
-    localStorage.setItem("frc_user", name);
-    setView("personal");
+  const handleDayDate = async (day, date) => {
+    const updated = { ...dayDates, [day]: date };
+    setDayDates(updated);
+    try { await saveToBin({ schedule, fixedRoles, days, dayDates: updated }); } catch(e) {}
   };
 
   const allNames = schedule
-    ? [...new Set(Object.values(schedule).flatMap(s =>
-        [...(s.driveTeam||[]), ...(s.pits||[]), ...(s.scouting||[]), ...(s.stands||[]),
-         s.pitCaptain, s.scoutingLead].filter(Boolean)
-      ))]
+    ? [...new Set(Object.values(schedule).flatMap(ds =>
+        Object.values(ds).flatMap(s =>
+          [...(s.pitProg||[]), ...(s.pitMech||[]), ...(s.scouting||[]), ...(s.recorder||[]), ...(s.off||[])]
+        )
+      ))].sort()
     : [];
 
-  return (
-    <div style={styles.root}>
-      <div style={styles.noise} />
+  const getPersonalSlots = useCallback((name) => {
+    if (!schedule || !name) return [];
+    const result = [];
+    for (const [day, ds] of Object.entries(schedule))
+      for (const [slot, r] of Object.entries(ds)) {
+        let role = null;
+        if      (r.pitProg?.includes(name))   role = "Pit Programmer";
+        else if (r.pitMech?.includes(name))   role = "Pit Mechanic";
+        else if (r.scouting?.includes(name))  role = "Scouting";
+        else if (r.recorder?.includes(name))  role = "Recorder";
+        else if (r.off?.includes(name))       role = "Off";
+        if (role) result.push({ day, slot, role });
+      }
+    return result;
+  }, [schedule]);
 
-      {/* HEADER */}
-      <header style={styles.header}>
-        <div style={styles.headerInner}>
-          <div style={styles.logo}>
-            <span style={styles.logoIcon}>⚙</span>
-            <span style={styles.logoText}>PitSync</span>
-          </div>
-          <nav style={styles.nav}>
-            <button style={{...styles.navBtn, ...(view==="landing"?styles.navBtnActive:{})}} onClick={()=>setView("landing")}>Home</button>
-            <button style={{...styles.navBtn, ...(view==="admin"?styles.navBtnActive:{})}} onClick={()=>setView("admin")}>Admin</button>
-            {schedule && <button style={{...styles.navBtn, ...(view==="personal"?styles.navBtnActive:{})}} onClick={()=>setView("personal")}>My Schedule</button>}
-            {schedule && <button style={{...styles.navBtn, ...(view==="full"?styles.navBtnActive:{})}} onClick={()=>setView("full")}>Full Schedule</button>}
+  const setupNotifs = useCallback(async (name) => {
+    const granted = await requestNotifPermission();
+    if (!granted) { alert("Please allow notifications in browser settings."); return; }
+    setNotifEnabled(true);
+    notifTimers.current.forEach(clearTimeout);
+    notifTimers.current = [];
+    for (const { day, slot, role } of getPersonalSlots(name)) {
+      if (role === "Off") continue;
+      const t = parseSlotTime(day, slot, dayDates); if (!t) continue;
+      const delay = t.getTime() - 10 * 60 * 1000 - Date.now(); if (delay < 0) continue;
+      notifTimers.current.push(setTimeout(() =>
+        new Notification("PitSync Reminder", { body: `You are on ${role} at ${slot} (${day}).` })
+      , delay));
+    }
+  }, [getPersonalSlots, dayDates]);
+
+  const handlePrint = () => window.print();
+
+  const effectiveDays = days.length > 0 ? days
+    : schedule ? ["Friday","Saturday","Sunday"].filter(d => schedule[d] && Object.keys(schedule[d]).length > 0)
+    : [];
+  const effectiveDay  = (selectedDay && effectiveDays.includes(selectedDay)) ? selectedDay : (effectiveDays[0] || null);
+  const hasSchedule   = !!schedule && effectiveDays.length > 0;
+
+  if (view === "loading") return (
+    <div style={{ ...S.root, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:16 }}>
+      <div style={S.spinner} />
+      <p style={{ color:"#555", fontSize:13, letterSpacing:2 }}>LOADING...</p>
+    </div>
+  );
+
+  return (
+    <div style={S.root}>
+      <div style={S.noise} />
+      <header style={S.header}>
+        <div style={S.hi}>
+          <span style={S.logoText}>PITSYNC</span>
+          <nav style={S.nav}>
+            {[["admin","Admin"], ...(hasSchedule ? [["personal","My Schedule"],["full","Schedule"]] : [])]
+              .map(([v, label]) => (
+                <button key={v} style={view===v ? {...S.nb,...S.nba} : S.nb} onClick={() => setView(v)}>
+                  {label}
+                </button>
+              ))}
           </nav>
         </div>
       </header>
 
-      <main style={styles.main}>
-        {/* LANDING */}
+      <main style={S.main}>
+
         {view === "landing" && (
-          <div style={styles.landing}>
-            <div style={styles.heroGlow} />
-            <h1 style={styles.heroTitle}>PitSync</h1>
-            <p style={styles.heroSub}>FRC Competition Scheduler</p>
-            <p style={styles.heroDesc}>Upload your team's availability CSV, generate a smart schedule with role constraints, and get notified before your next assignment.</p>
-            <div style={styles.heroButtons}>
-              {!schedule && <button style={styles.btnPrimary} onClick={()=>setView("admin")}>Upload CSV →</button>}
-              {schedule && <button style={styles.btnPrimary} onClick={()=>setView("personal")}>View My Schedule →</button>}
-              {schedule && <button style={styles.btnSecondary} onClick={()=>setView("full")}>Full Schedule</button>}
-            </div>
-            <div style={styles.featureRow}>
-              {[
-                {icon:"🔧", label:"Pit Captain & Scouting Lead roles"},
-                {icon:"🔔", label:"Push notifications before your slot"},
-                {icon:"🚫", label:"No back-to-back same roles"},
-                {icon:"📋", label:"CSV from Google Forms"},
-              ].map(f => (
-                <div key={f.label} style={styles.featureCard}>
-                  <span style={styles.featureIcon}>{f.icon}</span>
-                  <span style={styles.featureLabel}>{f.label}</span>
-                </div>
-              ))}
-            </div>
+          <div style={{ textAlign:"center", paddingTop:80 }}>
+            <h1 style={S.ht}>PITSYNC</h1>
+            <p style={{ color:"#555", fontSize:13, letterSpacing:3, marginBottom:32 }}>FRC COMPETITION SCHEDULER</p>
+            <p style={{ color:"#555", fontSize:13, maxWidth:400, margin:"0 auto 40px", lineHeight:1.8 }}>
+              No schedule uploaded yet. Ask your admin to upload the CSV.
+            </p>
+            <button style={S.bp} onClick={() => setView("admin")}>Go to Admin</button>
           </div>
         )}
 
-        {/* ADMIN */}
         {view === "admin" && (
-          <div style={styles.panel}>
-            <h2 style={styles.panelTitle}>Admin — Upload Schedule</h2>
-            <p style={styles.panelDesc}>Upload your Google Form CSV export. The app will generate the full schedule and save it for everyone.</p>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>CSV File (from Google Forms)</label>
-              <label style={styles.fileUpload}>
-                <span>Choose CSV file</span>
-                <input type="file" accept=".csv" onChange={handleCSVUpload} style={{display:"none"}} />
+          <div style={S.panel}>
+            <h2 style={S.pt}>Admin</h2>
+            <p style={S.pd}>Upload once. Everyone sees the schedule instantly.</p>
+            <div style={S.fg}>
+              <label style={S.lbl}>CSV File</label>
+              <label style={S.fu}>
+                Choose CSV file
+                <input type="file" accept=".csv" onChange={handleCSVUpload} style={{ display:"none" }} />
               </label>
-              {csvText && <span style={styles.fileReady}>✓ File loaded</span>}
+              {csvLoaded && <span style={S.ok}>File loaded</span>}
             </div>
-
-            <div style={styles.formGroup}>
-              <label style={styles.label}>Competition Date (for notifications)</label>
-              <input
-                type="date"
-                value={competitionDate}
-                onChange={e => setCompetitionDate(e.target.value)}
-                style={styles.input}
-              />
-            </div>
-
-            <div style={styles.infoBox}>
-              <strong style={{color:"#f4a261"}}>Expected CSV columns:</strong>
-              <code style={styles.code}>Timestamp, Name, Position, Available Timings</code>
-              <p style={{margin:"8px 0 0", fontSize:"13px", color:"#aaa"}}>
-                Position values: <em>Member, Lead, Drive Team, Pit Captain, Scouting Lead</em><br/>
-                Available Timings: comma-separated, e.g. <em>8-9, 9-10, 10-11</em>
-              </p>
-            </div>
-
+            {parseError && <div style={S.eb}>{parseError}</div>}
             <button
-              style={{...styles.btnPrimary, opacity: csvText ? 1 : 0.4}}
-              onClick={handleGenerateSchedule}
-              disabled={!csvText}
-            >
-              Generate & Save Schedule
+              style={{ ...S.bp, opacity:csvLoaded?1:0.4, cursor:csvLoaded?"pointer":"not-allowed" }}
+              onClick={handleGenerate} disabled={!csvLoaded}>
+              {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "Saved" : "Generate & Save Schedule"}
             </button>
-
-            {schedule && (
-              <div style={styles.successBox}>
-                ✓ Schedule generated and saved! Share this URL with your team.
-              </div>
+            {hasSchedule && (
+              <>
+                <div style={S.sb}>Schedule saved. All devices will load it automatically.</div>
+                <div style={{ marginTop:28 }}>
+                  <p style={{ ...S.lbl, marginBottom:14 }}>Competition Dates (for notifications)</p>
+                  {["Friday","Saturday","Sunday"].map(day => (
+                    <div key={day} style={{ display:"flex", alignItems:"center", gap:16, marginBottom:14 }}>
+                      <span style={{ ...S.lbl, margin:0, minWidth:68, color:"#f4a261" }}>{day}</span>
+                      <input type="date" value={dayDates[day]||""} onChange={e => handleDayDate(day, e.target.value)} style={{ ...S.input, flex:1 }} />
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         )}
 
-        {/* PERSONAL SCHEDULE */}
         {view === "personal" && (
-          <div style={styles.panel}>
-            <h2 style={styles.panelTitle}>My Schedule</h2>
-            {!schedule && <p style={styles.panelDesc}>No schedule uploaded yet. Ask your admin to upload the CSV.</p>}
-            {schedule && (
+          <div style={S.panel}>
+            <h2 style={S.pt}>My Schedule</h2>
+            {!hasSchedule ? <p style={S.pd}>No schedule yet.</p> : (
               <>
-                <div style={styles.formGroup}>
-                  <label style={styles.label}>Your Name</label>
-                  <select
-                    value={userName}
-                    onChange={e => handleUserLogin(e.target.value)}
-                    style={styles.input}
-                  >
-                    <option value="">— Select your name —</option>
-                    {allNames.sort().map(n => <option key={n} value={n}>{n}</option>)}
+                <div style={S.fg}>
+                  <label style={S.lbl}>Your Name</label>
+                  <select value={userName}
+                    onChange={e => { const n=e.target.value; setUserName(n); localStorage.setItem("frc_user",n); }}
+                    style={S.input}>
+                    <option value="">Select your name</option>
+                    {allNames.map(n => <option key={n} value={n}>{n}</option>)}
                   </select>
                 </div>
-
                 {userName && (
                   <>
-                    <button
-                      style={{...styles.btnSecondary, marginBottom: "24px"}}
-                      onClick={() => setupNotifications(userName)}
-                    >
-                      {notifEnabled ? "✓ Notifications Active" : "🔔 Enable Notifications"}
+                    <button style={{ ...S.bs, marginBottom:28 }} onClick={() => setupNotifs(userName)}>
+                      {notifEnabled ? "Notifications Active" : "Enable Notifications"}
                     </button>
-
-                    <div style={styles.personalSlots}>
-                      {getPersonalSlots(userName).length === 0
-                        ? <p style={{color:"#666"}}>You have no assigned slots.</p>
-                        : getPersonalSlots(userName).map(({ slot, role }) => {
-                            const rs = ROLE_STYLES[role] || ROLE_STYLES["Stands"];
-                            return (
-                              <div key={slot} style={{...styles.slotCard, borderColor: rs.accent}}>
-                                <div style={{...styles.slotTime, color: rs.accent}}>{slot}</div>
-                                <div style={{...styles.slotRole, background: rs.accent}}>{rs.label}</div>
+                    {effectiveDays.map(day => {
+                      const mySlots = getPersonalSlots(userName).filter(x => x.day === day);
+                      return (
+                        <div key={day} style={{ marginBottom:32 }}>
+                          <div style={S.dh}>{day}</div>
+                          {!mySlots.length
+                            ? <p style={{ color:"#444", fontSize:13 }}>No assignments this day.</p>
+                            : <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                                {mySlots.map(({ slot, role }) => {
+                                  const accent = ACCENT[role] || "#555";
+                                  return (
+                                    <div key={slot+role} style={{
+                                      display:"flex", alignItems:"center", justifyContent:"space-between",
+                                      background:"#0f0f16", borderWidth:1, borderStyle:"solid",
+                                      borderColor:accent, borderRadius:6, padding:"12px 16px"
+                                    }}>
+                                      <span style={{ fontSize:16, fontWeight:"bold", color:accent, letterSpacing:1 }}>{slot}</span>
+                                      <span style={{ fontSize:12, color:accent, letterSpacing:1, textTransform:"uppercase" }}>{role}</span>
+                                    </div>
+                                  );
+                                })}
                               </div>
-                            );
-                          })
-                      }
-                    </div>
+                          }
+                        </div>
+                      );
+                    })}
                   </>
                 )}
               </>
@@ -445,161 +474,141 @@ export default function App() {
           </div>
         )}
 
-        {/* FULL SCHEDULE */}
-        {view === "full" && schedule && (
-          <div style={styles.panel}>
-            <h2 style={styles.panelTitle}>Full Schedule</h2>
-            <div style={styles.scheduleGrid}>
-              {TIME_SLOTS.map(slot => {
-                const s = schedule[slot];
-                if (!s) return null;
-                return (
-                  <div key={slot} style={styles.scheduleCard}>
-                    <div style={styles.scheduleSlotHeader}>{slot}</div>
-                    <RoleRow label="Drive Team ★" names={s.driveTeam} accent="#e94560" />
-                    <RoleRow label="Pit Captain ★" names={s.pitCaptain ? [s.pitCaptain] : []} accent="#ff6b35" />
-                    <RoleRow label="Pits" names={s.pits} accent="#f4a261" />
-                    <RoleRow label="Scouting Lead ★" names={s.scoutingLead ? [s.scoutingLead] : []} accent="#0096ff" />
-                    <RoleRow label="Scouting" names={s.scouting} accent="#56cfe1" />
-                    <RoleRow label="Stands" names={s.stands} accent="#8338ec" />
-                  </div>
-                );
-              })}
+        {view === "full" && hasSchedule && (
+          <div>
+            {fixedRoles && (
+              <div style={S.fixedBlock} className="fixed-block">
+                <div style={S.fixedTitle} className="fixed-title">Competition Staff — Present All Weekend</div>
+                <div style={S.fixedGrid} className="fixed-grid">
+                  <FixedGroup label="Drive Team"       names={fixedRoles.driveTeam}      accent="#e94560" />
+                  <FixedGroup label="Pit Captain"      names={fixedRoles.pitCaptain}     accent="#ff6b35" />
+                  <FixedGroup label="Lead Programmer"  names={fixedRoles.leadProgrammer} accent="#f4a261" />
+                  <FixedGroup label="Scouting Lead"    names={fixedRoles.scoutingLead}   accent="#0096ff" />
+                </div>
+              </div>
+            )}
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12, flexWrap:"wrap", gap:12 }}>
+              <h2 style={{ ...S.pt, margin:0 }}>Hourly Schedule</h2>
+              <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+                {effectiveDays.map(day => (
+                  <button key={day} style={{
+                    ...S.bs, padding:"6px 16px", fontSize:12,
+                    background: effectiveDay===day ? "#f4a261" : "transparent",
+                    color:      effectiveDay===day ? "#0a0a0f"  : "#f4a261",
+                  }} onClick={() => setSelectedDay(day)}>{day}</button>
+                ))}
+              </div>
             </div>
+            <div style={{ marginBottom:20 }} className="no-print">
+              <button style={{ ...S.bp, fontSize:12 }} onClick={handlePrint}>Save as PDF</button>
+            </div>
+            {effectiveDay && schedule[effectiveDay] && (
+              <>
+                <div className="print-title">PitSync — Competition Schedule</div>
+                <div className="print-day">{effectiveDay}</div>
+                <div style={S.schedGrid} className="sched-grid">
+                {TIME_SLOTS.map(slot => {
+                  const sr = schedule[effectiveDay][slot];
+                  if (!sr) return null;
+                  if (!sr.pitProg?.length && !sr.pitMech?.length && !sr.scouting?.length && !sr.off?.length) return null;
+                  return (
+                    <div key={slot} style={S.card} className="card">
+                      <div style={S.cardHeader} className="card-header">{slot}</div>
+                      <SlotRow label="Pit Programmer" names={sr.pitProg}  accent="#f4a261" />
+                      <SlotRow label="Pit Mechanic"   names={sr.pitMech}  accent="#ff6b35" />
+                      <SlotRow label="Scouting"        names={sr.scouting} accent="#56cfe1" />
+                      <SlotRow label="Off"             names={sr.off}      accent="#444"    />
+                    </div>
+                  );
+                })}
+              </div>
+              </>
+            )}
           </div>
         )}
+
       </main>
     </div>
   );
 }
 
-function RoleRow({ label, names, accent }) {
-  if (!names || names.length === 0) return null;
+function FixedGroup({ label, names, accent }) {
+  if (!names?.length) return null;
   return (
-    <div style={styles.roleRow}>
-      <span style={{...styles.roleLabel, color: accent}}>{label}</span>
-      <span style={styles.roleNames}>{names.join(", ")}</span>
+    <div style={{ minWidth:140 }}>
+      <div className="fixed-label" style={{ fontSize:10, letterSpacing:2, textTransform:"uppercase", color:accent, marginBottom:6 }}>{label}</div>
+      {names.map(n => <div key={n} className="fixed-name" style={{ fontSize:13, color:"#ccc", marginBottom:3 }}>{n}</div>)}
     </div>
   );
 }
 
-// ─── STYLES ───────────────────────────────────────────────────────────────────
-const styles = {
-  root: {
-    minHeight: "100vh",
-    background: "#0a0a0f",
-    color: "#e8e8f0",
-    fontFamily: "'Courier New', 'Consolas', monospace",
-    position: "relative",
-    overflow: "hidden",
-  },
-  noise: {
-    position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0,
-    backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E")`,
-    opacity: 0.4,
-  },
-  header: {
-    borderBottom: "1px solid #1e1e2e",
-    background: "rgba(10,10,15,0.95)",
-    backdropFilter: "blur(10px)",
-    position: "sticky", top: 0, zIndex: 100,
-  },
-  headerInner: {
-    maxWidth: 1100, margin: "0 auto", padding: "0 24px",
-    display: "flex", alignItems: "center", justifyContent: "space-between", height: 60,
-  },
-  logo: { display: "flex", alignItems: "center", gap: 10 },
-  logoIcon: { fontSize: 22, color: "#f4a261" },
-  logoText: { fontSize: 20, fontWeight: "bold", letterSpacing: 2, color: "#f4a261" },
-  nav: { display: "flex", gap: 4 },
-  navBtn: {
-    background: "none", border: "1px solid transparent", color: "#888",
-    padding: "6px 14px", cursor: "pointer", borderRadius: 4,
-    fontFamily: "inherit", fontSize: 13, letterSpacing: 1, transition: "all 0.2s",
-  },
-  navBtnActive: { borderColor: "#f4a261", color: "#f4a261" },
-  main: { maxWidth: 1100, margin: "0 auto", padding: "40px 24px", position: "relative", zIndex: 1 },
+function SlotRow({ label, names, accent }) {
+  if (!names?.length) return null;
+  return (
+    <div style={{ marginBottom:10 }}>
+      <div className="slot-label" style={{ fontSize:10, letterSpacing:1, textTransform:"uppercase", color:accent, marginBottom:3 }}>{label}</div>
+      <div className="slot-names" style={{ fontSize:13, color:"#bbb", lineHeight:1.6 }}>{names.join(", ")}</div>
+    </div>
+  );
+}
 
-  // Landing
-  landing: { textAlign: "center", padding: "60px 0" },
-  heroGlow: {
-    position: "absolute", top: 0, left: "50%", transform: "translateX(-50%)",
-    width: 600, height: 300, borderRadius: "50%",
-    background: "radial-gradient(ellipse, rgba(244,162,97,0.08) 0%, transparent 70%)",
-    pointerEvents: "none",
-  },
-  heroTitle: { fontSize: "clamp(48px,8vw,96px)", margin: "0 0 8px", letterSpacing: 8, color: "#f4a261", fontWeight: "bold" },
-  heroSub: { fontSize: 18, color: "#666", letterSpacing: 4, margin: "0 0 24px" },
-  heroDesc: { fontSize: 15, color: "#aaa", maxWidth: 500, margin: "0 auto 40px", lineHeight: 1.7 },
-  heroButtons: { display: "flex", gap: 16, justifyContent: "center", marginBottom: 60 },
-  featureRow: { display: "flex", flexWrap: "wrap", gap: 16, justifyContent: "center", marginTop: 20 },
-  featureCard: {
-    background: "#111118", border: "1px solid #1e1e2e", borderRadius: 8,
-    padding: "16px 20px", display: "flex", alignItems: "center", gap: 10, minWidth: 220,
-  },
-  featureIcon: { fontSize: 20 },
-  featureLabel: { fontSize: 13, color: "#aaa" },
-
-  // Panel
-  panel: { maxWidth: 720, margin: "0 auto" },
-  panelTitle: { fontSize: 28, fontWeight: "bold", color: "#f4a261", letterSpacing: 2, marginBottom: 8 },
-  panelDesc: { color: "#888", marginBottom: 32, fontSize: 14, lineHeight: 1.7 },
-  formGroup: { marginBottom: 24 },
-  label: { display: "block", fontSize: 12, letterSpacing: 2, color: "#888", marginBottom: 8, textTransform: "uppercase" },
-  input: {
-    width: "100%", background: "#111118", border: "1px solid #2a2a3e",
-    color: "#e8e8f0", padding: "10px 14px", borderRadius: 6,
-    fontFamily: "inherit", fontSize: 14, outline: "none", boxSizing: "border-box",
-  },
-  fileUpload: {
-    display: "inline-block", background: "#111118", border: "1px dashed #2a2a3e",
-    padding: "12px 20px", borderRadius: 6, cursor: "pointer", fontSize: 14, color: "#aaa",
-  },
-  fileReady: { marginLeft: 12, color: "#4ade80", fontSize: 13 },
-  infoBox: {
-    background: "#111118", border: "1px solid #2a2a3e", borderRadius: 8,
-    padding: "16px", marginBottom: 24, fontSize: 13, color: "#aaa",
-  },
-  code: {
-    display: "block", background: "#0a0a0f", border: "1px solid #1e1e2e",
-    padding: "8px 12px", borderRadius: 4, color: "#56cfe1", fontFamily: "inherit",
-    margin: "8px 0", fontSize: 12,
-  },
-  successBox: {
-    marginTop: 20, background: "rgba(74,222,128,0.08)", border: "1px solid rgba(74,222,128,0.3)",
-    borderRadius: 8, padding: "14px 18px", color: "#4ade80", fontSize: 14,
-  },
-
-  // Buttons
-  btnPrimary: {
-    background: "#f4a261", color: "#0a0a0f", border: "none", padding: "12px 28px",
-    borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 14,
-    fontWeight: "bold", letterSpacing: 1, transition: "all 0.2s",
-  },
-  btnSecondary: {
-    background: "none", color: "#f4a261", border: "1px solid #f4a261", padding: "10px 24px",
-    borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: 14, letterSpacing: 1,
-  },
-
-  // Personal slots
-  personalSlots: { display: "flex", flexDirection: "column", gap: 12 },
-  slotCard: {
-    display: "flex", alignItems: "center", justifyContent: "space-between",
-    background: "#111118", border: "1px solid", borderRadius: 8, padding: "16px 20px",
-  },
-  slotTime: { fontSize: 20, fontWeight: "bold", letterSpacing: 2 },
-  slotRole: { color: "#0a0a0f", padding: "4px 12px", borderRadius: 20, fontSize: 13, fontWeight: "bold" },
-
-  // Full schedule
-  scheduleGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 16 },
-  scheduleCard: {
-    background: "#111118", border: "1px solid #1e1e2e", borderRadius: 10, padding: "20px",
-  },
-  scheduleSlotHeader: {
-    fontSize: 22, fontWeight: "bold", color: "#f4a261", letterSpacing: 3,
-    marginBottom: 16, borderBottom: "1px solid #1e1e2e", paddingBottom: 10,
-  },
-  roleRow: { marginBottom: 8 },
-  roleLabel: { fontSize: 11, letterSpacing: 1, textTransform: "uppercase", display: "block", marginBottom: 2 },
-  roleNames: { fontSize: 13, color: "#ccc" },
+const S = {
+  root:      { minHeight:"100vh", background:"#0a0a0f", color:"#e8e8f0", fontFamily:"'Courier New','Consolas',monospace", position:"relative" },
+  noise:     { position:"fixed", inset:0, pointerEvents:"none", zIndex:0, opacity:0.2,
+               backgroundImage:`url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E")` },
+  spinner:   { width:32, height:32, borderWidth:2, borderStyle:"solid", borderColor:"#1e1e2e", borderTopColor:"#f4a261", borderRadius:"50%", animation:"spin 0.8s linear infinite" },
+  header:    { borderBottomWidth:1, borderBottomStyle:"solid", borderBottomColor:"#1e1e2e", background:"rgba(10,10,15,0.98)", backdropFilter:"blur(10px)", position:"sticky", top:0, zIndex:100 },
+  hi:        { maxWidth:1100, margin:"0 auto", padding:"0 20px", display:"flex", alignItems:"center", justifyContent:"space-between", height:52 },
+  logoText:  { fontSize:15, fontWeight:"bold", letterSpacing:4, color:"#f4a261" },
+  nav:       { display:"flex", gap:4, flexWrap:"wrap" },
+  nb:        { background:"none", borderWidth:1, borderStyle:"solid", borderColor:"transparent", color:"#555", padding:"5px 12px", cursor:"pointer", borderRadius:4, fontFamily:"inherit", fontSize:11, letterSpacing:1 },
+  nba:       { borderColor:"#f4a261", color:"#f4a261" },
+  main:      { maxWidth:1100, margin:"0 auto", padding:"32px 20px", position:"relative", zIndex:1 },
+  ht:        { fontSize:"clamp(40px,8vw,80px)", margin:"0 0 4px", letterSpacing:10, color:"#f4a261", fontWeight:"bold", lineHeight:1 },
+  panel:     { maxWidth:640, margin:"0 auto" },
+  pt:        { fontSize:22, fontWeight:"bold", color:"#f4a261", letterSpacing:2, marginBottom:8 },
+  pd:        { color:"#555", marginBottom:24, fontSize:13, lineHeight:1.8 },
+  fg:        { marginBottom:20 },
+  lbl:       { display:"block", fontSize:10, letterSpacing:2, color:"#555", marginBottom:8, textTransform:"uppercase" },
+  input:     { width:"100%", background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1e1e2e", color:"#e8e8f0", padding:"10px 14px", borderRadius:6, fontFamily:"inherit", fontSize:13, outline:"none", boxSizing:"border-box" },
+  fu:        { display:"inline-flex", alignItems:"center", gap:8, background:"#0f0f16", borderWidth:1, borderStyle:"dashed", borderColor:"#2a2a3e", padding:"10px 18px", borderRadius:6, cursor:"pointer", fontSize:13, color:"#888" },
+  ok:        { marginLeft:12, color:"#4ade80", fontSize:11 },
+  sb:        { marginTop:16, background:"rgba(74,222,128,0.05)", borderWidth:1, borderStyle:"solid", borderColor:"rgba(74,222,128,0.2)", borderRadius:6, padding:"10px 14px", color:"#4ade80", fontSize:12 },
+  eb:        { marginBottom:14, background:"rgba(233,69,96,0.06)", borderWidth:1, borderStyle:"solid", borderColor:"rgba(233,69,96,0.2)", borderRadius:6, padding:"10px 14px", color:"#e94560", fontSize:12 },
+  bp:        { background:"#f4a261", color:"#0a0a0f", borderWidth:0, borderStyle:"solid", borderColor:"transparent", padding:"10px 24px", borderRadius:6, cursor:"pointer", fontFamily:"inherit", fontSize:13, fontWeight:"bold", letterSpacing:1 },
+  bs:        { background:"transparent", color:"#f4a261", borderWidth:1, borderStyle:"solid", borderColor:"#f4a261", padding:"8px 18px", borderRadius:6, cursor:"pointer", fontFamily:"inherit", fontSize:12, letterSpacing:1 },
+  dh:        { fontSize:10, letterSpacing:3, color:"#f4a261", textTransform:"uppercase", marginBottom:12, borderBottomWidth:1, borderBottomStyle:"solid", borderBottomColor:"#1a1a2a", paddingBottom:6 },
+  fixedBlock:{ background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1e1e2e", borderRadius:10, padding:"20px 24px", marginBottom:28 },
+  fixedTitle:{ fontSize:10, letterSpacing:3, textTransform:"uppercase", color:"#555", marginBottom:16 },
+  fixedGrid: { display:"flex", flexWrap:"wrap", gap:"20px 40px" },
+  schedGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(240px,1fr))", gap:12 },
+  card:      { background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1a1a2a", borderRadius:8, padding:"16px" },
+  cardHeader:{ fontSize:18, fontWeight:"bold", color:"#f4a261", letterSpacing:2, marginBottom:12, borderBottomWidth:1, borderBottomStyle:"solid", borderBottomColor:"#1a1a2a", paddingBottom:8 },
+  ib:        { background:"#0f0f16", borderWidth:1, borderStyle:"solid", borderColor:"#1e1e2e", borderRadius:8, padding:"14px", marginBottom:20, fontSize:12, color:"#666" },
 };
+
+const _s = document.createElement("style");
+_s.textContent = `
+  @keyframes spin{to{transform:rotate(360deg)}}
+  *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
+  input,select,button{font-size:16px!important}
+  @media print {
+    body { background: white !important; color: black !important; font-family: Arial, sans-serif !important; }
+    header, nav, button, .no-print { display: none !important; }
+    #root > div > div:first-child { display: none !important; }
+    .fixed-block { border: 1px solid #ccc !important; border-radius: 4px; padding: 12px; margin-bottom: 16px; background: #f9f9f9 !important; }
+    .fixed-title { color: #333 !important; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 10px; }
+    .fixed-grid { display: flex; flex-wrap: wrap; gap: 20px 40px; }
+    .sched-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .card { border: 1px solid #ddd !important; border-radius: 4px; padding: 10px; break-inside: avoid; background: white !important; }
+    .card-header { font-size: 14px; font-weight: bold; color: #333 !important; border-bottom: 1px solid #eee; padding-bottom: 6px; margin-bottom: 8px; }
+    .slot-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: #666 !important; margin-bottom: 2px; }
+    .slot-names { font-size: 11px; color: #333 !important; line-height: 1.5; }
+    .fixed-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: #666 !important; margin-bottom: 4px; }
+    .fixed-name { font-size: 12px; color: #333 !important; margin-bottom: 2px; }
+    .print-title { display: block !important; font-size: 20px; font-weight: bold; text-align: center; margin-bottom: 4px; color: black !important; }
+    .print-day { display: block !important; font-size: 13px; text-align: center; margin-bottom: 16px; color: #555 !important; }
+  }
+  .print-title, .print-day { display: none; }
+`;
+document.head.appendChild(_s);
