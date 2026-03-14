@@ -20,6 +20,7 @@ async function saveToBin(data) {
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const SCOUTING_PER_SLOT = 6;
 const TIME_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"];
+const SUNDAY_SLOTS = ["8-9","9-10","10-11","11-12","12-1"];
 
 // ─── PINNED CONSTRAINTS ───────────────────────────────────────────────────────
 // No pinned constraints — pure round-robin rotation for all certified members
@@ -138,8 +139,9 @@ function generateSchedule(members, days) {
 
     const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
 
-    for (let i = 0; i < TIME_SLOTS.length; i++) {
-      const slot = TIME_SLOTS[i];
+    const daySlots = day === "Sunday" ? SUNDAY_SLOTS : TIME_SLOTS;
+    for (let i = 0; i < daySlots.length; i++) {
+      const slot = daySlots[i];
       const avail      = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
 
 
