@@ -1,16 +1,22 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── API ─────────────────────────────────────────────────────────────────────
+const BIN_ID  = "69b361f5c3097a1dd51e8c8b";
+const API_KEY = "$2a$10$sw7DsOPVqOXjcl1OYlh3Te3ogd1vDTGKkJQNm9E0qb3r9G6uMSGJS";
+const BIN_URL = `https://api.jsonbin.io/v3/b/${BIN_ID}`;
+
 async function loadFromBin() {
-  const res = await fetch("/api/schedule");
+  const res = await fetch(BIN_URL + "/latest", {
+    headers: { "X-Master-Key": API_KEY, "X-Bin-Meta": "false" }
+  });
   if (!res.ok) throw new Error("Failed to load schedule");
   return res.json();
 }
 
 async function saveToBin(data) {
-  const res = await fetch("/api/schedule", {
+  const res = await fetch(BIN_URL, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Master-Key": API_KEY },
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error("Failed to save schedule");
@@ -229,7 +235,7 @@ async function requestNotifPermission() {
   return (await Notification.requestPermission()) === "granted";
 }
 
-const ACCENT = { "Pit Programmer":"#f4a261", "Pit Mechanic":"#ff6b35", "Scouting":"#56cfe1", "Off":"#444" };
+const ACCENT = { "Pit Programmer":"#f4a261", "Pit Mechanic":"#ff6b35", "Scouting":"#56cfe1", "Recorder":"#a78bfa", "Off":"#888" };
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
 export default function App() {
@@ -516,8 +522,9 @@ export default function App() {
                       <div style={S.cardHeader} className="card-header">{slot}</div>
                       <SlotRow label="Pit Programmer" names={sr.pitProg}  accent="#f4a261" />
                       <SlotRow label="Pit Mechanic"   names={sr.pitMech}  accent="#ff6b35" />
-                      <SlotRow label="Scouting"        names={sr.scouting} accent="#56cfe1" />
-                      <SlotRow label="Off"             names={sr.off}      accent="#444"    />
+                      <SlotRow label="Scouting"        names={sr.scouting}  accent="#56cfe1" />
+                      <SlotRow label="Recorder"        names={sr.recorder} accent="#a78bfa" />
+                      <SlotRow label="Off"             names={sr.off}       accent="#888"    />
                     </div>
                   );
                 })}
