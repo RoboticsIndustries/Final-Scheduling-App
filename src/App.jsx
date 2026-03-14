@@ -130,9 +130,7 @@ function generateSchedule(members, days) {
   // Build queues ONCE across all days so rotation is continuous Sat→Sun
   // Reset cooldowns only — queue order persists
   for (const m of members) { m.lastProgIdx = -99; m.lastMechIdx = -99; m.lastScoutIdx = -99; }
-  let progQueue = members.filter(m => m.hasPitProg).map(m => m.name);
-  // Put Aryan first so he gets an early morning slot
-  progQueue = ["Aryan Mitra", ...progQueue.filter(n => n !== "Aryan Mitra")];
+  let progQueue = members.filter(m => m.hasPitProg && m.name !== "Aryan Mitra").map(m => m.name);
   let mechQueue = members.filter(m => m.hasPitMech).map(m => m.name);
   for (const day of days) {
     schedule[day] = {};
