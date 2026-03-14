@@ -22,6 +22,7 @@ const SCOUTING_PER_SLOT = 6;
 const TIME_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"];
 const SUNDAY_SLOTS = ["8-9","9-10","10-11","11-12","12-1"];
 
+
 // ─── PINNED CONSTRAINTS ───────────────────────────────────────────────────────
 // No pinned constraints — pure round-robin rotation for all certified members
 
@@ -130,6 +131,8 @@ function generateSchedule(members, days) {
   // Reset cooldowns only — queue order persists
   for (const m of members) { m.lastProgIdx = -99; m.lastMechIdx = -99; m.lastScoutIdx = -99; }
   let progQueue = members.filter(m => m.hasPitProg).map(m => m.name);
+  // Put Aryan first so he gets an early morning slot
+  progQueue = ["Aryan Mitra", ...progQueue.filter(n => n !== "Aryan Mitra")];
   let mechQueue = members.filter(m => m.hasPitMech).map(m => m.name);
   for (const day of days) {
     schedule[day] = {};
