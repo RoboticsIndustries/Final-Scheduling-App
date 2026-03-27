@@ -612,3 +612,4 @@ _s.textContent = `
   .print-title, .print-day { display: none; }
 `;
 document.head.appendChild(_s);
+
