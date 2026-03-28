@@ -1,7 +1,7 @@
 const https = require('https');
 
-const TIME_SLOTS   = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"];
-const SUNDAY_SLOTS = ["8-9","9-10","10-11","11-12","12-1"];
+const TIME_SLOTS   = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6","6-7"];
+const SUNDAY_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5"];
 const SCOUTS_PER_SLOT = 6;
 const PINNED_PROG = { "11-12":"Aryan Mitra", "1-2":"Kartik Gupta", "3-4":"Kartik Gupta" };
 const PROG_EXCLUDE    = new Set(["Aryan Mitra","Thisath Halambage","Kartik Gupta"]);
