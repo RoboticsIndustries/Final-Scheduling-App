@@ -276,6 +276,8 @@ export default function App() {
   const [notifEnabled, setNotifEnabled] = useState(false);
   const [parseError, setParseError]   = useState("");
   const [syncStatus, setSyncStatus]   = useState("idle");
+  const [jsonPaste, setJsonPaste]     = useState("");
+  const [jsonError, setJsonError]     = useState("");
   const notifTimers = useRef([]);
 
   useEffect(() => {
@@ -311,6 +313,25 @@ export default function App() {
       setSyncStatus("saved"); setParseError(""); setView("full");
       setTimeout(() => setSyncStatus("idle"), 3000);
     } catch(e) { setSyncStatus("error"); setParseError("Error: " + e.message); }
+  };
+
+  const handlePasteJSON = async () => {
+    if (!jsonPaste.trim()) return;
+    try {
+      setSyncStatus("saving");
+      const data = JSON.parse(jsonPaste.trim());
+      if (!data.schedule) { setJsonError("Invalid JSON — missing 'schedule' key."); setSyncStatus("idle"); return; }
+      await saveBin(data);
+      setSchedule(data.schedule);
+      if (data.fixedRoles) setFixedRoles(data.fixedRoles);
+      if (data.days?.length) { setDays(data.days); setSelectedDay(data.days[0]); }
+      if (data.dayDates) setDayDates(p => ({ ...p, ...data.dayDates }));
+      setSyncStatus("saved"); setJsonError(""); setJsonPaste(""); setView("full");
+      setTimeout(() => setSyncStatus("idle"), 3000);
+    } catch(e) {
+      setJsonError("Invalid JSON: " + e.message);
+      setSyncStatus("idle");
+    }
   };
 
   const handleDayDate = async (day, date) => {
@@ -416,6 +437,21 @@ export default function App() {
               onClick={handleGenerate} disabled={!csvLoaded}>
               {syncStatus==="saving" ? "Saving..." : syncStatus==="saved" ? "Saved!" : "Generate & Save Schedule"}
             </button>
+
+            <div style={{ marginTop:32, borderTopWidth:1, borderTopStyle:"solid", borderTopColor:"#1e1e2e", paddingTop:24 }}>
+              <p style={S.lbl}>Or paste schedule JSON directly</p>
+              <textarea
+                value={jsonPaste}
+                onChange={e => setJsonPaste(e.target.value)}
+                placeholder='Paste JSON here...'
+                style={{ ...S.input, height:120, resize:"vertical", fontFamily:"monospace", fontSize:11 }}
+              />
+              {jsonError && <div style={{ ...S.eb, marginTop:8 }}>{jsonError}</div>}
+              <button style={{ ...S.bp, marginTop:10, opacity:jsonPaste.trim()?1:0.4, cursor:jsonPaste.trim()?"pointer":"not-allowed" }}
+                onClick={handlePasteJSON} disabled={!jsonPaste.trim()}>
+                {syncStatus==="saving" ? "Saving..." : "Load from JSON"}
+              </button>
+            </div>
             {hasSchedule && (
               <>
                 <div style={S.sb}>Live — all devices update automatically.</div>
