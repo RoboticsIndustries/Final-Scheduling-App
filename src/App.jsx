@@ -555,7 +555,7 @@ export default function App() {
               <>
                 <div className="print-title">PitSync — {effectiveDay}</div>
                 <div style={S.grid} className="sched-grid">
-                  {(effectiveDay === "Sunday" ? SUNDAY_SLOTS : TIME_SLOTS).map(slot => {
+                  {TIME_SLOTS.map(slot => {
                     const sr = schedule[effectiveDay][slot];
                     if (!sr) return null;
                     return (
