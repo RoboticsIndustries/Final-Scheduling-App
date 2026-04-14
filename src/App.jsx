@@ -18,8 +18,10 @@ async function saveBin(data) {
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const TIME_SLOTS   = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6","6-7"];
-const SUNDAY_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5"];
+// All days use TIME_SLOTS (Thu/Fri/Sat all 7:30AM-7PM)
 const SCOUTS_PER_SLOT = 6;
+const MAX_SCOUT_SHIFTS = 5;
+const MAX_SCOUT_IN_ROW = 2;
 
 // Manually pinned pit programmer slots
 const PINNED_PROG = { "11-12": "Aryan Mitra", "1-2": "Kartik Gupta", "3-4": "Kartik Gupta" };
@@ -146,12 +148,12 @@ function generateSchedule(members, days) {
 
   // Per-person cooldown indices (reset each day)
   const state = {};
-  for (const m of members) state[m.name] = { lastScout: -99, lastRecorder: -99, lastScanner: -99 };
+  for (const m of members) state[m.name] = { lastScout:-99, lastRecorder:-99, lastScanner:-99, scoutCount:0, scoutInARow:0 };
 
   for (const day of days) {
     schedule[day] = {};
     // Reset cooldowns each day
-    for (const m of members) state[m.name] = { lastScout: -99, lastRecorder: -99, lastScanner: -99 };
+    for (const m of members) state[m.name] = { lastScout:-99, lastRecorder:-99, lastScanner:-99, scoutCount:0, scoutInARow:0 };
 
     const daySlots   = day === "Sunday" ? SUNDAY_SLOTS : TIME_SLOTS;
     const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
@@ -181,16 +183,24 @@ function generateSchedule(members, days) {
       }
       if (mech) { used.add(mech); mechQueue = [...mechQueue.filter(n => n !== mech), mech]; }
 
-      // ── Scouting (6 per slot, rotating) ──
+      // ── Scouting (6 per slot, max 2 in a row, max 5 per day) ──
       const scoutPool = dayMembers
-        .filter(m => avail(m.name) && !used.has(m.name))
-        .sort((a, b) => state[a.name].lastScout - state[b.name].lastScout);
+        .filter(m =>
+          avail(m.name) && !used.has(m.name) &&
+          (state[m.name].scoutCount || 0) < MAX_SCOUT_SHIFTS &&
+          (state[m.name].scoutInARow || 0) < MAX_SCOUT_IN_ROW
+        )
+        .sort((a, b) => (state[a.name].scoutCount||0) - (state[b.name].scoutCount||0));
       const scouting = [];
       for (const m of scoutPool) {
         if (scouting.length >= SCOUTS_PER_SLOT) break;
-        scouting.push(m.name);
-        used.add(m.name);
-        state[m.name].lastScout = i;
+        scouting.push(m.name); used.add(m.name);
+        state[m.name].scoutCount = (state[m.name].scoutCount || 0) + 1;
+        state[m.name].scoutInARow = (state[m.name].scoutInARow || 0) + 1;
+      }
+      // Reset in-a-row for people who didn't scout
+      for (const m of dayMembers) {
+        if (avail(m.name) && !scouting.includes(m.name)) state[m.name].scoutInARow = 0;
       }
 
       // ── Recorder (1 per slot from off, min 2-slot gap, not SPECIAL_EXCLUDE) ──
@@ -271,7 +281,7 @@ export default function App() {
   const [fixedRoles, setFixedRoles]   = useState(null);
   const [days, setDays]               = useState([]);
   const [selectedDay, setSelectedDay] = useState(null);
-  const [dayDates, setDayDates]       = useState({ Saturday: "", Sunday: "" });
+  const [dayDates, setDayDates]       = useState({ Thursday: "", Friday: "", Saturday: "" });
   const [userName, setUserName]       = useState(() => localStorage.getItem("frc_user") || "");
   const [notifEnabled, setNotifEnabled] = useState(false);
   const [parseError, setParseError]   = useState("");
@@ -383,7 +393,7 @@ export default function App() {
   }, [getPersonalSlots, dayDates]);
 
   const effectiveDays = days.length > 0 ? days
-    : schedule ? ["Saturday","Sunday"].filter(d => schedule[d] && Object.keys(schedule[d]).length > 0) : [];
+    : schedule ? ["Thursday","Friday","Saturday"].filter(d => schedule[d] && Object.keys(schedule[d]).length > 0) : [];
   const effectiveDay = (selectedDay && effectiveDays.includes(selectedDay)) ? selectedDay : (effectiveDays[0] || null);
   const hasSchedule  = !!schedule && effectiveDays.length > 0;
 
@@ -457,7 +467,7 @@ export default function App() {
                 <div style={S.sb}>Live — all devices update automatically.</div>
                 <div style={{ marginTop:24 }}>
                   <p style={{ ...S.lbl, marginBottom:12 }}>Competition Dates (for notifications)</p>
-                  {["Saturday","Sunday"].map(day => (
+                  {["Thursday","Friday","Saturday"].map(day => (
                     <div key={day} style={{ display:"flex", alignItems:"center", gap:16, marginBottom:12 }}>
                       <span style={{ ...S.lbl, margin:0, minWidth:68, color:"#f4a261" }}>{day}</span>
                       <input type="date" value={dayDates[day]||""} onChange={e => handleDayDate(day, e.target.value)} style={{ ...S.input, flex:1 }} />
