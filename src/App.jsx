@@ -155,7 +155,7 @@ function generateSchedule(members, days) {
     // Reset cooldowns each day
     for (const m of members) state[m.name] = { lastScout:-99, lastRecorder:-99, lastScanner:-99, scoutCount:0, scoutInARow:0 };
 
-    const daySlots   = day === "Sunday" ? SUNDAY_SLOTS : TIME_SLOTS;
+    const daySlots   = TIME_SLOTS;
     const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
 
     for (let i = 0; i < daySlots.length; i++) {
