@@ -26,7 +26,7 @@ async function saveBin(data) {
 const ALL_SLOTS     = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6","6-7"];
 const SCOUTS_PER_SLOT  = 6;
 const MAX_SCOUT_IN_ROW = 2;
-const MAX_SCOUT_PER_DAY = 5;
+const MAX_SCOUT_PER_DAY = 7;
 
 // Fixed role positions — these people appear in the header block only
 const FIXED_POSITIONS = new Set(["Drive Team","Pit Captain","Scouting Lead","Lead Programmer"]);
@@ -253,25 +253,25 @@ function generateSchedule(members, days) {
       }
       if (mech) used.add(mech);
 
-      // ── Scouting (6 per slot, max 2 in a row, max 5 per day) ──
-      const scoutEligible = dayMembers
-        .filter(m =>
-          here(m.name) &&
-          !used.has(m.name) &&
-          state[m.name].scoutCount   < MAX_SCOUT_PER_DAY &&
-          state[m.name].scoutInARow  < MAX_SCOUT_IN_ROW
-        )
-        .sort((a, b) => state[a.name].scoutCount - state[b.name].scoutCount);
-
+      // ── Scouting: always fill 6 per slot ──
+      // Priority: rested people first, then anyone under daily max, then anyone at all
+      const here_free = dayMembers.filter(m => here(m.name) && !used.has(m.name));
+      const rested = here_free
+        .filter(m => state[m.name].scoutInARow < MAX_SCOUT_IN_ROW && state[m.name].scoutCount < MAX_SCOUT_PER_DAY)
+        .sort((a,b) => state[a.name].scoutCount - state[b.name].scoutCount);
+      const under_max = here_free
+        .filter(m => state[m.name].scoutCount < MAX_SCOUT_PER_DAY && !rested.find(r => r.name === m.name))
+        .sort((a,b) => state[a.name].scoutCount - state[b.name].scoutCount);
+      const last_resort = here_free.filter(m =>
+        !rested.find(r => r.name === m.name) && !under_max.find(r => r.name === m.name)
+      );
+      const scoutPool = [...rested, ...under_max, ...last_resort];
       const scouting = [];
-      for (const m of scoutEligible) {
+      for (const m of scoutPool) {
         if (scouting.length >= SCOUTS_PER_SLOT) break;
-        scouting.push(m.name);
-        used.add(m.name);
-        state[m.name].scoutCount++;
-        state[m.name].scoutInARow++;
+        scouting.push(m.name); used.add(m.name);
+        state[m.name].scoutCount++; state[m.name].scoutInARow++;
       }
-      // Reset consecutive count for people who didn't scout this slot
       for (const m of dayMembers) {
         if (!scouting.includes(m.name)) state[m.name].scoutInARow = 0;
       }

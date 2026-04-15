@@ -18,7 +18,7 @@ function findCSV() {
 const ALL_SLOTS        = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6","6-7"];
 const SCOUTS_PER_SLOT  = 6;
 const MAX_SCOUT_IN_ROW = 2;
-const MAX_SCOUT_PER_DAY = 5;
+const MAX_SCOUT_PER_DAY = 7;
 const FIXED_POSITIONS  = new Set(["Drive Team","Pit Captain","Scouting Lead","Lead Programmer"]);
 
 function normalizeSlot(raw) {
@@ -211,19 +211,36 @@ function generateSchedule(members, days) {
       }
       if (mech) used.add(mech);
 
-      // Scouting
-      const scoutEligible = dayMembers
-        .filter(m => here(m.name) && !used.has(m.name) &&
-          state[m.name].scoutCount  < MAX_SCOUT_PER_DAY &&
-          state[m.name].scoutInARow < MAX_SCOUT_IN_ROW)
+      // ── Scouting: always try to fill 6, breaks enforced when possible ──
+      // Strategy: prefer rested people (< MAX_SCOUT_IN_ROW), but use tired people
+      // if needed to fill the slot. Max per day is a soft cap — never leave slot short.
+      const presentFree = dayMembers.filter(m => here(m.name) && !used.has(m.name));
+      const rested = presentFree
+        .filter(m => state[m.name].scoutInARow < MAX_SCOUT_IN_ROW && state[m.name].scoutCount < MAX_SCOUT_PER_DAY)
         .sort((a, b) => state[a.name].scoutCount - state[b.name].scoutCount);
+      const canScout = presentFree
+        .filter(m => state[m.name].scoutCount < MAX_SCOUT_PER_DAY)
+        .sort((a, b) => state[a.name].scoutCount - state[b.name].scoutCount);
+      // Fill from rested first, then anyone under daily max, then anyone at all
+      const scoutPool = [
+        ...rested,
+        ...canScout.filter(m => !rested.includes(m)),
+        ...presentFree.filter(m => !canScout.includes(m)),
+      ];
       const scouting = [];
-      for (const m of scoutEligible) {
+      for (const m of scoutPool) {
         if (scouting.length >= SCOUTS_PER_SLOT) break;
-        scouting.push(m.name); used.add(m.name);
-        state[m.name].scoutCount++; state[m.name].scoutInARow++;
+        if (!used.has(m.name)) {
+          scouting.push(m.name);
+          used.add(m.name);
+          state[m.name].scoutCount++;
+          state[m.name].scoutInARow++;
+        }
       }
-      for (const m of dayMembers) { if (!scouting.includes(m.name)) state[m.name].scoutInARow = 0; }
+      // Reset consecutive count for people who didn't scout this slot
+      for (const m of dayMembers) {
+        if (!scouting.includes(m.name)) state[m.name].scoutInARow = 0;
+      }
 
       // Recorder
       const offPool = dayMembers.filter(m => here(m.name) && !used.has(m.name)).map(m => m.name);
