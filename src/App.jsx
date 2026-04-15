@@ -415,7 +415,7 @@ export default function App() {
   const allNames = schedule
     ? [...new Set(Object.values(schedule).flatMap(ds =>
         Object.values(ds).flatMap(s =>
-          [...(s.pitProg||[]), ...(s.pitMech||[]), ...(s.scouting||[]), ...(s.recorder||[]), ...(s.off||[])]
+          [...(s.pitProg||[]), ...(s.pitMech||[]), ...(s.scouting||[]), ...(s.off||[])]
         )
       ))].sort()
     : [];
@@ -429,7 +429,6 @@ export default function App() {
         if      (r.pitProg?.includes(name))   role = "Pit Programmer";
         else if (r.pitMech?.includes(name))   role = "Pit Mechanic";
         else if (r.scouting?.includes(name))  role = "Scouting";
-        else if (r.recorder?.includes(name))  role = "Recorder";
         else if (r.off?.includes(name))       role = "Off";
         if (role) result.push({ day, slot, role });
       }
@@ -640,7 +639,6 @@ export default function App() {
                         <SR label="Pit Programmer" names={sr.pitProg}   accent="#f4a261" />
                         <SR label="Pit Mechanic"   names={sr.pitMech}   accent="#ff6b35" />
                         <SR label="Scouting"       names={sr.scouting}  accent="#56cfe1" />
-                        <SR label="Recorder"       names={sr.recorder}  accent="#a78bfa" />
                         <SR label="Off"            names={sr.off}       accent="#888"    />
                       </div>
                     );
