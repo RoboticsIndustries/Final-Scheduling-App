@@ -1,235 +1,287 @@
 const https = require('https');
+const fs    = require('fs');
+const path  = require('path');
 
-// ─── COMPETITION CONFIG ───────────────────────────────────────────────────────
-const TIME_SLOTS = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6","6-7"];
-const DAYS = ["Thursday","Friday","Saturday"];
-const SCOUTS_PER_SLOT = 6;
-const MAX_SCOUT_SHIFTS = 5;   // max times someone can scout per day
-const MAX_SCOUT_IN_ROW = 2;   // max consecutive scouting slots
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
+const BIN_ID  = "69c713c1aa77b81da92916cd";
+const API_KEY = "$2a$10$sw7DsOPVqOXjcl1OYlh3Te3ogd1vDTGKkJQNm9E0qb3r9G6uMSGJS";
 
-// ─── PINNED PROGRAMMER SLOTS ─────────────────────────────────────────────────
-// Jake is Lead Programmer (fixed role), so only Peter rotates for pit prog
-// No pinned slots needed — Peter handles all prog slots he's available for
-
-// ─── MEMBERS ─────────────────────────────────────────────────────────────────
-// sat/fri/thu: true = available all day
-// slots: specific slot overrides per day
-const allMembers = [
-  { name:"Peter Rezkalla",      hasPitProg:true,  hasPitMech:false, thu:true,  fri:true,  sat:true  },
-  { name:"Xiaoran Yan",         hasPitProg:false, hasPitMech:true,  thu:true,  fri:true,  sat:true  },
-  { name:"Sunny Kota",          hasPitProg:false, hasPitMech:true,  thu:true,  fri:true,  sat:true  },
-  { name:"Brennan Murphy",      hasPitProg:false, hasPitMech:true,  thu:true,  fri:true,  sat:false },
-  { name:"Liam Harden",         hasPitProg:false, hasPitMech:false, thu:false, fri:true,  sat:true,  thuSlots:["5-6"] },
-  { name:"Neil Pant",           hasPitProg:false, hasPitMech:true,  thu:true,  fri:true,  sat:true  },
-  { name:"Katie Widmann",       hasPitProg:false, hasPitMech:true,  thu:true,  fri:true,  sat:true  },
-  { name:"Ethan Wang",          hasPitProg:false, hasPitMech:true,  thu:true,  fri:true,  sat:true  },
-  { name:"Louis Barna",         hasPitProg:false, hasPitMech:true,  thu:false, fri:true,  sat:true,  thuSlots:["5-6"] },
-  { name:"Kristen Dodds",       hasPitProg:false, hasPitMech:false, thu:true,  fri:true,  sat:true  },
-  { name:"Azim Ahmad Julkipli", hasPitProg:false, hasPitMech:false, thu:false, fri:false, sat:false, satSlots:["9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6"] },
-  { name:"Dhivansh Kochhar",    hasPitProg:false, hasPitMech:false, thu:true,  fri:true,  sat:true  },
-  { name:"Aadi Patel",          hasPitProg:false, hasPitMech:true,  thu:false, fri:false, sat:true  },
-  { name:"Aditya Ganesan",      hasPitProg:false, hasPitMech:true,  thu:false, fri:false, sat:true  },
-];
-
-const fixedRoles = {
-  driveTeam:     ["Charlie Brubach","Dominic Kane","Louis Barna","Kristen Dodds","Dhivansh Kochhar"],
-  pitCaptain:    ["Dina Jabini"],
-  leadProgrammer:["Jake Widmann"],
-  scoutingLead:  ["Albert Wang"],
-};
-
-// ─── AVAILABILITY ─────────────────────────────────────────────────────────────
-const byName = Object.fromEntries(allMembers.map(m => [m.name, m]));
-
-function avail(name, day, slot) {
-  const m = byName[name];
-  if (!m) return false;
-  const d = day.toLowerCase().slice(0,3); // thu/fri/sat
-  // Check specific slot overrides first
-  if (d === "thu" && m.thuSlots) return m.thuSlots.includes(slot);
-  if (d === "fri" && m.friSlots) return m.friSlots.includes(slot);
-  if (d === "sat" && m.satSlots) return m.satSlots.includes(slot);
-  // Fall back to all-day flag
-  if (d === "thu") return !!m.thu;
-  if (d === "fri") return !!m.fri;
-  if (d === "sat") return !!m.sat;
-  return false;
+// Find the CSV file — looks for any .csv in the current directory
+function findCSV() {
+  const files = fs.readdirSync('.').filter(f => f.endsWith('.csv'));
+  if (!files.length) throw new Error("No CSV file found in current directory. Put your CSV here.");
+  console.log(`Using CSV: ${files[0]}`);
+  return fs.readFileSync(files[0], 'utf8');
 }
 
-// ─── SCHEDULER ───────────────────────────────────────────────────────────────
-function generateSchedule() {
-  const schedule = {};
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const ALL_SLOTS        = ["8-9","9-10","10-11","11-12","12-1","1-2","2-3","3-4","4-5","5-6","6-7"];
+const SCOUTS_PER_SLOT  = 6;
+const MAX_SCOUT_IN_ROW = 2;
+const MAX_SCOUT_PER_DAY = 5;
+const FIXED_POSITIONS  = new Set(["Drive Team","Pit Captain","Scouting Lead","Lead Programmer"]);
 
-  // Prog and mech queues persist across all days for fair rotation
-  const progQueue = allMembers.filter(m => m.hasPitProg).map(m => m.name);
-  const mechQueue = allMembers.filter(m => m.hasPitMech && !m.hasPitProg).map(m => m.name);
-  const recorderQueue = [...allMembers.map(m => m.name)];
-  const scannerQueue  = [...allMembers.map(m => m.name)];
+function normalizeSlot(raw) {
+  return raw.trim().replace(/\s*(AM|PM)/gi, "").trim();
+}
 
-  for (const day of DAYS) {
-    schedule[day] = {};
+function classifyRole(roleRaw) {
+  const r = (roleRaw || "").trim().toLowerCase();
+  if (r.includes("drive"))         return "Drive Team";
+  if (r.includes("pit captain"))   return "Pit Captain";
+  if (r.includes("scouting lead")) return "Scouting Lead";
+  if (r.includes("lead"))          return "Lead Programmer";
+  return "Member";
+}
 
-    // Per-person state — resets each day
-    const state = {};
-    for (const m of allMembers) {
-      state[m.name] = {
-        scoutCount:     0,    // total scouts this day
-        scoutInARow:    0,    // current consecutive scout slots
-        lastRole:       null, // last assigned role
-        lastRecorder:   -99,
-        lastScanner:    -99,
-      };
+function detectFormat(headerRow) {
+  const h = headerRow.join(" ").toLowerCase();
+  return (h.includes("thurs") || h.includes("thu")) ? "new" : "old";
+}
+
+function parseCSVLine(line) {
+  const cols = []; let cur = "", inQ = false;
+  for (const ch of line) {
+    if      (ch === '"')         { inQ = !inQ; }
+    else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ""; }
+    else                         { cur += ch; }
+  }
+  cols.push(cur.trim());
+  return cols;
+}
+
+function parseCSV(text) {
+  const rawLines = text.trim().split("\n").map(parseCSVLine);
+  if (rawLines.length < 2) return { members: [], fixedRoles: {}, days: [] };
+
+  const header = rawLines[0];
+  const format = detectFormat(header);
+  console.log(`Detected format: ${format} (${format === "new" ? "Thu/Fri/Sat" : "Fri/Sat/Sun"})`);
+
+  const membersMap = {};
+
+  for (const line of rawLines.slice(1)) {
+    if (!line || line.length < 5) continue;
+    const firstName = (line[1] || "").trim();
+    const lastName  = (line[2] || "").trim();
+    // Normalize name: proper case to catch duplicates like "Sunny kota" vs "Sunny Kota"
+    const rawName = `${firstName} ${lastName}`.trim();
+    const name = rawName.replace(/\b\w/g, c => c.toUpperCase());
+    if (!name) continue;
+    const nl = name.toLowerCase();
+    if (nl.includes("filler") || nl.match(/^first\s*\d*\s*last\s*\d*$/i)) continue;
+
+    let timingsByDay = {};
+    let roleCol, progCol, mechCol;
+
+    if (format === "new") {
+      roleCol = 12; progCol = 13; mechCol = 14;
+      const thuAll = (line[5] || "").trim().toLowerCase();
+      const thuRaw = (line[6] || "").trim();
+      const friAll = (line[7] || "").trim().toLowerCase();
+      const friRaw = (line[8] || "").trim();
+      const satAll = (line[9] || "").trim().toLowerCase();
+      const satRaw = (line[10] || "").trim();
+
+      const thuSlots = thuAll === "yes" ? [...ALL_SLOTS] : thuRaw ? thuRaw.split(",").map(normalizeSlot).filter(s => ALL_SLOTS.includes(s)) : [];
+      const friSlots = friAll === "yes" ? [...ALL_SLOTS] : friRaw ? friRaw.split(",").map(normalizeSlot).filter(s => ALL_SLOTS.includes(s)) : [];
+      const satSlots = satAll === "yes" ? [...ALL_SLOTS] : satRaw ? satRaw.split(",").map(normalizeSlot).filter(s => ALL_SLOTS.includes(s)) : [];
+
+      if (thuSlots.length) timingsByDay["Thursday"] = thuSlots;
+      if (friSlots.length) timingsByDay["Friday"]   = friSlots;
+      if (satSlots.length) timingsByDay["Saturday"] = satSlots;
+    } else {
+      roleCol = 10; progCol = 12; mechCol = 13;
+      const friArrival = (line[4] || "").trim().toLowerCase();
+      const satAll     = (line[5] || "").trim().toLowerCase();
+      const satRaw     = (line[6] || "").trim();
+      const sunAll     = (line[7] || "").trim().toLowerCase();
+      const sunRaw     = (line[8] || "").trim();
+
+      let friSlots = [];
+      if      (friArrival.includes("4 pm") || friArrival.includes("4pm")) friSlots = ["4-5","5-6"];
+      else if (friArrival.includes("5 pm") || friArrival.includes("5pm")) friSlots = ["5-6"];
+      else if (friArrival.startsWith("yes"))                               friSlots = ["4-5","5-6"];
+
+      const satSlots = satAll === "yes" ? [...ALL_SLOTS] : satRaw ? satRaw.split(",").map(normalizeSlot).filter(s => ALL_SLOTS.includes(s)) : [];
+      const sunSlots = sunAll === "yes" ? [...ALL_SLOTS] : sunRaw ? sunRaw.split(",").map(normalizeSlot).filter(s => ALL_SLOTS.includes(s)) : [];
+
+      if (friSlots.length) timingsByDay["Friday"]   = friSlots;
+      if (satSlots.length) timingsByDay["Saturday"] = satSlots;
+      if (sunSlots.length) timingsByDay["Sunday"]   = sunSlots;
     }
 
-    const dayMembers = allMembers.filter(m =>
-      TIME_SLOTS.some(slot => avail(m.name, day, slot))
-    );
+    const roleRaw     = (line[roleCol] || "").trim();
+    const pitProgCert = (line[progCol] || "").trim().toLowerCase();
+    const pitMechCert = (line[mechCol] || "").trim().toLowerCase();
+    const position    = classifyRole(roleRaw);
+    const hasPitProg  = pitProgCert === "yes";
+    const hasPitMech  = pitMechCert === "yes";
 
-    for (let i = 0; i < TIME_SLOTS.length; i++) {
-      const slot = TIME_SLOTS[i];
-      const present = dayMembers.filter(m => avail(m.name, day, slot));
+    if (membersMap[name]) {
+      membersMap[name].hasPitProg = membersMap[name].hasPitProg || hasPitProg;
+      membersMap[name].hasPitMech = membersMap[name].hasPitMech || hasPitMech;
+      for (const [day, slots] of Object.entries(timingsByDay)) {
+        if (!membersMap[name].timingsByDay[day]) membersMap[name].timingsByDay[day] = [];
+        for (const s of slots) if (!membersMap[name].timingsByDay[day].includes(s)) membersMap[name].timingsByDay[day].push(s);
+      }
+    } else {
+      membersMap[name] = { position, hasPitProg, hasPitMech, timingsByDay };
+    }
+  }
+
+  const fixedRoles = { driveTeam: [], pitCaptain: [], leadProgrammer: [], scoutingLead: [] };
+  const members    = [];
+
+  for (const [name, info] of Object.entries(membersMap)) {
+    if (FIXED_POSITIONS.has(info.position)) {
+      switch (info.position) {
+        case "Drive Team":      fixedRoles.driveTeam.push(name);      break;
+        case "Pit Captain":     fixedRoles.pitCaptain.push(name);     break;
+        case "Scouting Lead":   fixedRoles.scoutingLead.push(name);   break;
+        case "Lead Programmer": fixedRoles.leadProgrammer.push(name); break;
+        default: break;
+      }
+    } else {
+      members.push({ name, hasPitProg: info.hasPitProg, hasPitMech: info.hasPitMech, timingsByDay: info.timingsByDay });
+    }
+  }
+
+  const dayOrder = ["Thursday","Friday","Saturday","Sunday"];
+  const days = dayOrder.filter(d => members.some(m => (m.timingsByDay[d] || []).length > 0));
+
+  console.log(`\nFixed roles:`);
+  console.log(`  Drive Team: ${fixedRoles.driveTeam.join(", ") || "none"}`);
+  console.log(`  Pit Captain: ${fixedRoles.pitCaptain.join(", ") || "none"}`);
+  console.log(`  Lead Programmer: ${fixedRoles.leadProgrammer.join(", ") || "none"}`);
+  console.log(`  Scouting Lead: ${fixedRoles.scoutingLead.join(", ") || "none"}`);
+  console.log(`\nSchedulable members (${members.length}):`);
+  for (const m of members) {
+    const certs = [m.hasPitProg?"PitProg":"", m.hasPitMech?"PitMech":""].filter(Boolean).join("+") || "no cert";
+    console.log(`  ${m.name} [${certs}] days: ${Object.keys(m.timingsByDay).join(", ")}`);
+  }
+  console.log(`\nDays: ${days.join(", ")}\n`);
+
+  return { members, fixedRoles, days };
+}
+
+function generateSchedule(members, days) {
+  const schedule = {};
+  const byName   = Object.fromEntries(members.map(m => [m.name, m]));
+
+  // Build queues — persist across all days
+  const progQueue = members.filter(m => m.hasPitProg).map(m => m.name);
+  const mechOnly  = members.filter(m => m.hasPitMech && !m.hasPitProg).map(m => m.name);
+  const recorderQueue = members.map(m => m.name);
+
+  console.log(`Pit Programmer queue: ${progQueue.join(", ") || "EMPTY — no one has pit prog cert!"}`);
+  console.log(`Pit Mechanic queue:   ${mechOnly.join(", ") || "EMPTY — no one has pit mech cert (not in prog queue)!"}`);
+
+  for (const day of days) {
+    schedule[day] = {};
+    const state = {};
+    for (const m of members) state[m.name] = { scoutCount:0, scoutInARow:0, lastRecorder:-99 };
+
+    const dayMembers = members.filter(m => (m.timingsByDay[day] || []).length > 0);
+
+    for (let i = 0; i < ALL_SLOTS.length; i++) {
+      const slot = ALL_SLOTS[i];
+      const here = (name) => (byName[name]?.timingsByDay[day] || []).includes(slot);
       const used = new Set();
 
-      // ── Pit Programmer (1, round-robin) ──
+      // Pit Programmer
       let prog = null;
-      for (const name of progQueue) {
-        if (present.find(m => m.name === name) && !used.has(name)) {
-          prog = name; break;
+      for (let j = 0; j < progQueue.length; j++) {
+        if (here(progQueue[j]) && !used.has(progQueue[j])) {
+          prog = progQueue[j];
+          progQueue.splice(j, 1); progQueue.push(prog);
+          break;
         }
       }
-      if (prog) {
-        used.add(prog);
-        // Rotate to back of queue
-        const idx = progQueue.indexOf(prog);
-        progQueue.splice(idx, 1);
-        progQueue.push(prog);
-        state[prog].lastRole = "Pit Programmer";
-      }
+      if (prog) used.add(prog);
 
-      // ── Pit Mechanic (1, round-robin) ──
+      // Pit Mechanic
       let mech = null;
-      for (const name of mechQueue) {
-        if (present.find(m => m.name === name) && !used.has(name)) {
-          mech = name; break;
+      for (let j = 0; j < mechOnly.length; j++) {
+        if (here(mechOnly[j]) && !used.has(mechOnly[j])) {
+          mech = mechOnly[j];
+          mechOnly.splice(j, 1); mechOnly.push(mech);
+          break;
         }
       }
-      if (mech) {
-        used.add(mech);
-        const idx = mechQueue.indexOf(mech);
-        mechQueue.splice(idx, 1);
-        mechQueue.push(mech);
-        state[mech].lastRole = "Pit Mechanic";
-      }
+      if (mech) used.add(mech);
 
-      // ── Scouting (6, fair rotation with constraints) ──
-      // Rules:
-      // 1. Max MAX_SCOUT_IN_ROW consecutive scout slots
-      // 2. Max MAX_SCOUT_SHIFTS total per day
-      // 3. Prefer people who scouted least recently
-      const scoutEligible = present
-        .filter(m =>
-          !used.has(m.name) &&
-          state[m.name].scoutCount < MAX_SCOUT_SHIFTS &&
-          state[m.name].scoutInARow < MAX_SCOUT_IN_ROW
-        )
+      // Scouting
+      const scoutEligible = dayMembers
+        .filter(m => here(m.name) && !used.has(m.name) &&
+          state[m.name].scoutCount  < MAX_SCOUT_PER_DAY &&
+          state[m.name].scoutInARow < MAX_SCOUT_IN_ROW)
         .sort((a, b) => state[a.name].scoutCount - state[b.name].scoutCount);
-
       const scouting = [];
       for (const m of scoutEligible) {
         if (scouting.length >= SCOUTS_PER_SLOT) break;
-        scouting.push(m.name);
-        used.add(m.name);
-        state[m.name].scoutCount++;
-        state[m.name].scoutInARow++;
-        state[m.name].lastRole = "Scouting";
+        scouting.push(m.name); used.add(m.name);
+        state[m.name].scoutCount++; state[m.name].scoutInARow++;
       }
+      for (const m of dayMembers) { if (!scouting.includes(m.name)) state[m.name].scoutInARow = 0; }
 
-      // Reset scoutInARow for people who didn't scout this slot
-      for (const m of present) {
-        if (!scouting.includes(m.name)) {
-          state[m.name].scoutInARow = 0;
-        }
-      }
-
-      // ── Recorder (1 from remaining, min 2-slot gap) ──
-      const offPool = present.filter(m => !used.has(m.name)).map(m => m.name);
+      // Recorder
+      const offPool = dayMembers.filter(m => here(m.name) && !used.has(m.name)).map(m => m.name);
       let recorder = null;
-      for (const name of recorderQueue) {
-        if (offPool.includes(name) && (i - state[name].lastRecorder) > 2) {
-          recorder = name; break;
+      for (let j = 0; j < recorderQueue.length; j++) {
+        const n = recorderQueue[j];
+        if (offPool.includes(n) && (i - state[n].lastRecorder) > 2) {
+          recorder = n;
+          recorderQueue.splice(j, 1); recorderQueue.push(n);
+          break;
         }
       }
-      if (recorder) {
-        used.add(recorder);
-        state[recorder].lastRecorder = i;
-        state[recorder].lastRole = "Recorder";
-        const idx = recorderQueue.indexOf(recorder);
-        recorderQueue.splice(idx, 1);
-        recorderQueue.push(recorder);
-      }
+      if (recorder) { used.add(recorder); state[recorder].lastRecorder = i; }
 
-      // ── Scanner (1 from remaining, min 2-slot gap) ──
-      const offPool2 = present.filter(m => !used.has(m.name)).map(m => m.name);
-      let scanner = null;
-      for (const name of scannerQueue) {
-        if (offPool2.includes(name) && (i - state[name].lastScanner) > 2) {
-          scanner = name; break;
-        }
-      }
-      if (scanner) {
-        used.add(scanner);
-        state[scanner].lastScanner = i;
-        state[scanner].lastRole = "Scanner";
-        const idx = scannerQueue.indexOf(scanner);
-        scannerQueue.splice(idx, 1);
-        scannerQueue.push(scanner);
-      }
-
-      // ── Off ──
-      const off = present.filter(m => !used.has(m.name)).map(m => m.name);
-      for (const m of off) state[m.name].lastRole = "Off";
+      const off = dayMembers.filter(m => here(m.name) && !used.has(m.name)).map(m => m.name);
 
       schedule[day][slot] = {
         pitProg:  prog     ? [prog]     : [],
         pitMech:  mech     ? [mech]     : [],
         scouting,
         recorder: recorder ? [recorder] : [],
-        scanner:  scanner  ? [scanner]  : [],
         off,
       };
 
-      console.log(`${day} ${slot}: P=${prog||"-"} M=${mech||"-"} S(${scouting.length}) R=${recorder||"-"} SC=${scanner||"-"}`);
+      console.log(`${day} ${slot}: PROG=${prog||"-"} MECH=${mech||"-"} scouts=${scouting.length} REC=${recorder||"-"}`);
     }
   }
   return schedule;
 }
 
-// ─── SAVE TO JSONBIN ──────────────────────────────────────────────────────────
-const schedule = generateSchedule();
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
+const csvText = findCSV();
+const { members, fixedRoles, days } = parseCSV(csvText);
+const schedule = generateSchedule(members, days);
+
 const payload = JSON.stringify({
-  schedule,
-  fixedRoles,
-  days: DAYS,
-  dayDates: { Thursday:"", Friday:"", Saturday:"" }
+  schedule, fixedRoles, days,
+  dayDates: Object.fromEntries(days.map(d => [d, ""]))
 });
 
 const options = {
   hostname: 'api.jsonbin.io',
-  path: '/v3/b/69c713c1aa77b81da92916cd',
+  path: `/v3/b/${BIN_ID}`,
   method: 'PUT',
   headers: {
     'Content-Type': 'application/json',
-    'X-Master-Key': '$2a$10$sw7DsOPVqOXjcl1OYlh3Te3ogd1vDTGKkJQNm9E0qb3r9G6uMSGJS',
+    'X-Master-Key': API_KEY,
     'Content-Length': Buffer.byteLength(payload),
   },
 };
 
+console.log("\nSaving to JSONBin...");
 const req = https.request(options, res => {
   let d = '';
   res.on('data', c => d += c);
   res.on('end', () => {
-    if (res.statusCode === 200) console.log('\n✓ Schedule saved! Refresh the site.');
-    else console.log('\n✗ Error:', res.statusCode, d);
+    if (res.statusCode === 200) console.log('✓ Schedule saved! Refresh the site.');
+    else console.log('✗ Error:', res.statusCode, d);
   });
 });
 req.on('error', e => console.error('Error:', e.message));
